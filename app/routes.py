@@ -1,13 +1,28 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import math
 
 from app.backtest_engine import run_long_only_backtest
 from app.report_generator import generate_report_html
 
 
+def sanitise_metrics(d):
+    if d is None:
+        return None
+    clean = {}
+    for k, v in d.items():
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            clean[k] = None
+        elif isinstance(v, dict):
+            clean[k] = sanitise_metrics(v)
+        else:
+            clean[k] = v
+    return clean
+
+
 def create_app():
     app = Flask(__name__)
-    CORS(app)  # allow the Cloudflare Pages frontend (different origin) to call this API
+    CORS(app)
 
     @app.route("/")
     def health_check():
@@ -42,10 +57,13 @@ def create_app():
                 benchmark_ticker="SPX",
             )
 
+            clean_metrics = sanitise_metrics({k: v for k, v in metrics.items() if k != "benchmark"})
+            clean_benchmark = sanitise_metrics(metrics.get("benchmark"))
+
             return jsonify({
                 "name": payload.get("name", "Untitled Backtest"),
-                "metrics": {k: v for k, v in metrics.items() if k != "benchmark"},
-                "benchmark": metrics.get("benchmark"),
+                "metrics": clean_metrics,
+                "benchmark": clean_benchmark,
                 "dashboard_html": html,
             })
 
@@ -54,7 +72,6 @@ def create_app():
 
     @app.route("/api/portfolios", methods=["GET"])
     def list_portfolios():
-        # Placeholder: hardcoded until Data tab uploads are wired to a real store
         return jsonify({"portfolios": ["BAM_f7_default"]})
 
     return app
