@@ -3,12 +3,8 @@ backtest_engine.py
 
 Core backtesting logic, ported from H1_backtest_hedge.py.
 Long-only mode: hedge overlay is neutralised (premium=0, payoff=0)
-so unhedged metrics are the long-only results.
-
-All file paths are parameterised so this works with Render's
-ephemeral disk: input files are read from the repo's Input/ folder
-(baked into the deploy), output is written to a temp directory
-scoped to a single request.
+so unhedged metrics are the long-only results, and "hedged" fields
+mirror the unhedged ones since there is no option overlay yet.
 """
 
 import os
@@ -16,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 
-# ---------- CONFIG DEFAULTS ----------
 INPUT_DIR = "Input"
 PORTFOLIO_FILE = "portfolio_BAM_default.csv"
 RETURNS_FILE = "returns.csv"
@@ -27,10 +22,7 @@ FREQUENCY = "annual"
 RISK_FREQUENCY = "monthly"
 ROLLING_WINDOW = 3
 
-SPX_BASE_INDEX = 100.0
 
-
-# ---------- PERIOD HELPERS ----------
 def parse_period_col(col: str):
     col = col.strip()
     if "M" not in col:
@@ -98,10 +90,6 @@ def cagr(cum_return, n_periods, ppy):
 
 
 def parse_val(val):
-    """
-    Converts European-style decimal strings (e.g. '1,23' meaning 1.23)
-    into floats. Matches the original H1_backtest_hedge.py logic exactly.
-    """
     if isinstance(val, str):
         try:
             return float(val.replace(",", ".").strip())
@@ -167,9 +155,8 @@ def resample_returns_for_risk(period_returns_series, frequency, risk_frequency, 
     return pd.Series(grouped), risk_ppy, risk_frequency
 
 
-# ---------- CORE METRICS ----------
 def compute_metrics(results_df, return_col, frequency, risk_frequency, rolling_window, ppy,
-                     index_df=None, benchmark_ticker=None, available=None, monthly_returns_map=None):
+                     monthly_returns_map=None):
     period_returns = results_df[return_col].dropna()
     n_periods = len(period_returns)
     cum_series = (1 + results_df[return_col]).cumprod()
@@ -196,13 +183,21 @@ def compute_metrics(results_df, return_col, frequency, risk_frequency, rolling_w
 
     var95 = float(np.percentile(period_returns, 5)) if n_periods > 0 else np.nan
     hit_rate = (period_returns > 0).sum() / n_periods if n_periods else np.nan
+    std_period_return = period_returns.std()
 
     rolling_cagrs = []
     for i in range(n_periods - rolling_window + 1):
         w = period_returns.iloc[i:i + rolling_window]
         rolling_cagrs.append(cagr(np.prod(1 + w) - 1, rolling_window, ppy))
 
-    metrics = {
+    best_idx = period_returns.idxmax() if n_periods else None
+    worst_idx = period_returns.idxmin() if n_periods else None
+    best_period = str(results_df.loc[best_idx, "period"]) if best_idx is not None else None
+    worst_period = str(results_df.loc[worst_idx, "period"]) if worst_idx is not None else None
+    best_period_return = float(period_returns.loc[best_idx]) if best_idx is not None else None
+    worst_period_return = float(period_returns.loc[worst_idx]) if worst_idx is not None else None
+
+    return {
         "n_periods": n_periods,
         "total_cumulative": total_cumulative,
         "annualised_return": annualised_return,
@@ -210,57 +205,61 @@ def compute_metrics(results_df, return_col, frequency, risk_frequency, rolling_w
         "sortino": sortino,
         "max_drawdown": max_drawdown,
         "calmar": calmar,
-        "var95": var95,
+        "var_95": var95,
         "hit_rate": hit_rate,
+        "std_period_return": std_period_return,
         "risk_freq_used": risk_freq_used,
         "best_rolling_cagr": max(rolling_cagrs) if rolling_cagrs else np.nan,
         "worst_rolling_cagr": min(rolling_cagrs) if rolling_cagrs else np.nan,
+        "best_period": best_period,
+        "best_period_return": best_period_return,
+        "worst_period": worst_period,
+        "worst_period_return": worst_period_return,
     }
 
-    if index_df is not None and benchmark_ticker in index_df.index:
-        bench_period_rets = {}
-        for rp in results_df["period"]:
-            sub = months_in_period(rp, frequency, available)
-            if not sub:
-                continue
-            rets, ok = [], True
-            for m in sub:
-                if m not in index_df.columns:
-                    ok = False
-                    break
-                r = index_df.loc[benchmark_ticker, m]
-                if isinstance(r, pd.Series):
-                    r = r.iloc[0]
-                if pd.isna(r):
-                    ok = False
-                    break
-                rets.append(r)
-            if ok and rets:
-                bench_period_rets[rp] = np.prod([1 + r for r in rets]) - 1
 
-        bench_series = pd.Series(bench_period_rets)
-        port_series = results_df.set_index("period")[return_col]
-        common = port_series.index.intersection(bench_series.index)
+def compute_benchmark_stats(results_df, return_col, index_df, benchmark_ticker, frequency, available, ppy, annualised_return):
+    if index_df is None or benchmark_ticker not in index_df.index:
+        return None
 
-        if len(common) > 1:
-            port_aligned = port_series.loc[common]
-            bench_aligned = bench_series.loc[common]
-            n_common = len(common)
-            bench_cum = np.prod(1 + bench_aligned) - 1
-            bench_cagr = cagr(bench_cum, n_common, ppy)
-            alpha = annualised_return - bench_cagr
+    bench_period_rets = {}
+    for rp in results_df["period"]:
+        sub = months_in_period(rp, frequency, available)
+        if not sub:
+            continue
+        rets, ok = [], True
+        for m in sub:
+            if m not in index_df.columns:
+                ok = False
+                break
+            r = index_df.loc[benchmark_ticker, m]
+            if isinstance(r, pd.Series):
+                r = r.iloc[0]
+            if pd.isna(r):
+                ok = False
+                break
+            rets.append(r)
+        if ok and rets:
+            bench_period_rets[rp] = np.prod([1 + r for r in rets]) - 1
 
-            cov_matrix = np.cov(port_aligned.values, bench_aligned.values)
-            beta_est = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else np.nan
+    bench_series = pd.Series(bench_period_rets)
+    port_series = results_df.set_index("period")[return_col]
+    common = port_series.index.intersection(bench_series.index)
 
-            metrics["benchmark"] = {
-                "n_common": n_common,
-                "cagr": bench_cagr,
-                "alpha": alpha,
-                "beta": beta_est,
-            }
+    if len(common) <= 1:
+        return None
 
-    return metrics
+    port_aligned = port_series.loc[common]
+    bench_aligned = bench_series.loc[common]
+    n_common = len(common)
+    bench_cum = np.prod(1 + bench_aligned) - 1
+    bench_cagr = cagr(bench_cum, n_common, ppy)
+    alpha = annualised_return - bench_cagr
+
+    cov_matrix = np.cov(port_aligned.values, bench_aligned.values)
+    beta_est = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else np.nan
+
+    return {"n_common": n_common, "cagr": bench_cagr, "alpha": alpha, "beta": beta_est}, bench_series
 
 
 def get_normalised_ticker_map(returns_df_index):
@@ -291,6 +290,24 @@ def load_returns_csv(path):
     return df
 
 
+def load_index_csv(path):
+    index_raw = pd.read_csv(path, sep=";", dtype=str)
+    index_raw.columns = index_raw.columns.str.strip()
+    index_raw["ticker"] = index_raw["ticker"].str.strip()
+    index_raw = index_raw.set_index("ticker")
+    index_raw = index_raw.drop(columns=["index"], errors="ignore")
+    idx_period_cols = {}
+    for col in index_raw.columns:
+        p = parse_period_col(col)
+        if p is not None:
+            idx_period_cols[col] = p
+    index_raw = index_raw[list(idx_period_cols.keys())]
+    index_df = index_raw.map(lambda v: parse_val(v) / 100.0)
+    index_df.columns = [idx_period_cols[c] for c in index_df.columns]
+    index_df = index_df[~index_df.index.duplicated(keep="first")]
+    return index_df
+
+
 def load_portfolio_csv(path):
     portfolio = pd.read_csv(path, parse_dates=["date"])
     portfolio["period"] = portfolio["date"].dt.to_period("M")
@@ -313,7 +330,9 @@ def run_long_only_backtest(
 ):
     """
     Runs the long-only portfolio backtest (hedge overlay disabled).
-    Returns (results_df, metrics_dict).
+    Returns (results_df, metrics_dict). results_df includes a
+    spx_return column per period so the report template's benchmark
+    comparisons and charts render correctly even with no hedge.
     """
     ppy = periods_per_year(frequency)
 
@@ -326,20 +345,7 @@ def run_long_only_backtest(
         raise ValueError("No overlapping periods between returns file and requested window.")
     returns_df = returns_df[available]
 
-    index_raw = pd.read_csv(os.path.join(input_dir, index_file), sep=";", dtype=str)
-    index_raw.columns = index_raw.columns.str.strip()
-    index_raw["ticker"] = index_raw["ticker"].str.strip()
-    index_raw = index_raw.set_index("ticker")
-    index_raw = index_raw.drop(columns=["index"], errors="ignore")
-    idx_period_cols = {}
-    for col in index_raw.columns:
-        p = parse_period_col(col)
-        if p is not None:
-            idx_period_cols[col] = p
-    index_raw = index_raw[list(idx_period_cols.keys())]
-    index_df = index_raw.map(lambda v: parse_val(v) / 100.0)
-    index_df.columns = [idx_period_cols[c] for c in index_df.columns]
-    index_df = index_df[~index_df.index.duplicated(keep="first")]
+    index_df = load_index_csv(os.path.join(input_dir, index_file))
 
     portfolio = load_portfolio_csv(os.path.join(input_dir, portfolio_file))
     portfolio = portfolio[(portfolio["period"] >= available[0]) & (portfolio["period"] <= available[-1])]
@@ -398,10 +404,30 @@ def run_long_only_backtest(
             for m in sub_months:
                 if monthly_weights[m] > 0:
                     monthly_port_rets[m] = sum(monthly_weighted[m]) / monthly_weights[m]
+
+            spx_ret = None
+            if benchmark_ticker in index_df.index:
+                spx_rets = []
+                ok = True
+                for m in sub_months:
+                    if m not in index_df.columns:
+                        ok = False
+                        break
+                    r = index_df.loc[benchmark_ticker, m]
+                    if isinstance(r, pd.Series):
+                        r = r.iloc[0]
+                    if pd.isna(r):
+                        ok = False
+                        break
+                    spx_rets.append(r)
+                if ok and spx_rets:
+                    spx_ret = np.prod([1 + r for r in spx_rets]) - 1
+
             results.append({
                 "period": rebal_period,
                 "date": rebal_period.to_timestamp(how="end").normalize(),
                 "portfolio_return_adjusted": adjusted_return,
+                "spx_return": spx_ret,
                 "weight_coverage": total_weight_used,
                 "n_holdings": len(weighted_returns),
             })
@@ -412,10 +438,51 @@ def run_long_only_backtest(
     results_df = pd.DataFrame(results).sort_values("period").reset_index(drop=True)
     results_df["cumulative_return"] = (1 + results_df["portfolio_return_adjusted"]).cumprod() - 1
 
-    metrics = compute_metrics(
+    results_df["exercised"] = False
+    results_df["premium_paid_pct_initial"] = 0.0
+    results_df["payoff_pct_initial"] = 0.0
+    results_df["net_hedge_pnl_pct_port"] = 0.0
+    results_df["hedged_return"] = results_df["portfolio_return_adjusted"]
+    results_df["hedged_cumulative_return"] = results_df["cumulative_return"]
+
+    unhedged_metrics = compute_metrics(
         results_df, "portfolio_return_adjusted", frequency, risk_frequency, rolling_window, ppy,
-        index_df=index_df, benchmark_ticker=benchmark_ticker, available=available,
+        monthly_returns_map=monthly_port_rets,
+    )
+    hedged_metrics = compute_metrics(
+        results_df, "hedged_return", frequency, risk_frequency, rolling_window, ppy,
         monthly_returns_map=monthly_port_rets,
     )
 
-    return results_df, metrics
+    bench_unhedged = compute_benchmark_stats(
+        results_df, "portfolio_return_adjusted", index_df, benchmark_ticker, frequency, available, ppy,
+        unhedged_metrics["annualised_return"],
+    )
+    bench_hedged = compute_benchmark_stats(
+        results_df, "hedged_return", index_df, benchmark_ticker, frequency, available, ppy,
+        hedged_metrics["annualised_return"],
+    )
+    if bench_unhedged is not None:
+        unhedged_metrics["benchmark"] = bench_unhedged[0]
+    if bench_hedged is not None:
+        hedged_metrics["benchmark"] = bench_hedged[0]
+
+    put_stats = {
+        "exercise_rate": 0.0,
+        "n_exercised": 0,
+        "n_years": len(results_df),
+        "total_premium_paid_pct_initial": 0.0,
+        "total_payoff_received_pct_initial": 0.0,
+        "net_hedge_cost_pct_initial": 0.0,
+        "avg_annual_premium_drag": 0.0,
+        "hedge_effectiveness_corr": None,
+        "drawdown_reduction": 0.0,
+        "avg_holdings": float(results_df["n_holdings"].mean()),
+        "avg_turnover": None,
+    }
+
+    return results_df, {
+        "unhedged": unhedged_metrics,
+        "hedged": hedged_metrics,
+        "put_stats": put_stats,
+    }
