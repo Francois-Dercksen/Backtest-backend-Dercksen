@@ -22,7 +22,7 @@ def sanitise_metrics(d):
 
 def create_app():
     app = Flask(__name__)
-    CORS(app)
+    CORS(app)  # allow the Cloudflare Pages frontend (different origin) to call this API
 
     @app.route("/")
     def health_check():
@@ -72,6 +72,7 @@ def create_app():
 
     @app.route("/api/portfolios", methods=["GET"])
     def list_portfolios():
+        # Placeholder: hardcoded until Data tab uploads are wired to a real store
         return jsonify({"portfolios": ["BAM_f7_default"]})
 
     return app
