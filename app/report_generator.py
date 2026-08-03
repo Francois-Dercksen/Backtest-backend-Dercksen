@@ -1,15 +1,10 @@
 """
 report_generator.py
 
-Ported from H2_report_hedge-2.py. Builds an HTML dashboard by injecting
-JSON data into the placeholder tokens inside the report template.
-
-For long-only backtests, period records are mapped onto the same
-field names the hedge template's JS expects (port_return, spx_return,
-exercised, premium_paid, payoff, net_hedge_pnl, hedged_return,
-unhedged_cumulative_return, hedged_cumulative_return, holdings) with
-hedge-specific fields neutralised to zero/False since there is no
-hedge overlay in long-only mode.
+Builds the HTML dashboard by injecting JSON data into the placeholder
+tokens inside the hedge report template. Field names match exactly
+what backtest_report_hedge_template.html's JS expects (see STATS
+lookups via getStat(section, metric) and RESULTS.map(r => r.<field>)).
 """
 
 import json
@@ -22,56 +17,49 @@ import pandas as pd
 TEMPLATE_PATH = os.path.join("Input", "backtest_report_hedge_template.html")
 
 
+def _clean_val(v):
+    if hasattr(v, "isoformat"):
+        return v.isoformat()[:10]
+    if hasattr(v, "strftime") and not hasattr(v, "isoformat"):
+        return str(v)
+    if type(v).__module__ == "numpy":
+        item = v.item()
+        return None if isinstance(item, float) and math.isnan(item) else item
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    return v
+
+
 def sanitise_for_json(records):
-    clean = []
-    for row in records:
-        new_row = {}
-        for k, v in row.items():
-            if hasattr(v, "isoformat"):
-                new_row[k] = v.isoformat()[:10]
-            elif hasattr(v, "strftime") and not hasattr(v, "isoformat"):
-                new_row[k] = str(v)
-            elif type(v).__module__ == "numpy":
-                item = v.item()
-                new_row[k] = None if isinstance(item, float) and math.isnan(item) else item
-            elif isinstance(v, bool):
-                new_row[k] = v
-            elif isinstance(v, float) and math.isnan(v):
-                new_row[k] = None
-            else:
-                new_row[k] = v
-        clean.append(new_row)
-    return clean
+    return [{k: _clean_val(v) for k, v in row.items()} for row in records]
 
 
-def build_period_records_for_template(results_df):
+def build_period_records(results_df):
     """
-    Maps long-only results_df columns onto the exact field names the
-    hedge report template's JS expects. Hedge-specific fields are
-    neutralised (0 / False) since long-only has no option overlay.
+    Field names must match the template's RESULTS.map(r => r.<field>)
+    usage exactly: period, portfolio_return_adjusted, spx_return,
+    exercised, premium_paid_pct_initial, payoff_pct_initial,
+    net_hedge_pnl_pct_port, hedged_return, cumulative_return,
+    hedged_cumulative_return, n_holdings.
     """
-    mapped = []
-    for _, row in results_df.iterrows():
-        port_ret = row.get("portfolio_return_adjusted", None)
-        cum_ret = row.get("cumulative_return", None)
-        mapped.append({
-            "period": str(row.get("period", "")),
-            "date": row.get("date", ""),
-            "portfolio_return_adjusted": port_ret,
-            "spx_return": None,
-            "exercised": False,
-            "premium_paid": 0.0,
-            "payoff": 0.0,
-            "net_hedge_pnl": 0.0,
-            "hedged_return": port_ret,
-            "unhedged_cumulative_return": cum_ret,
-            "hedged_cumulative_return": cum_ret,
-            "holdings": row.get("n_holdings", None),
-        })
-    return mapped
+    cols = [
+        "period", "date", "portfolio_return_adjusted", "spx_return",
+        "exercised", "premium_paid_pct_initial", "payoff_pct_initial",
+        "net_hedge_pnl_pct_port", "hedged_return", "cumulative_return",
+        "hedged_cumulative_return", "n_holdings",
+    ]
+    records = results_df[[c for c in cols if c in results_df.columns]].to_dict(orient="records")
+    return records
 
 
 def build_stats_records(metrics, frequency, risk_frequency, benchmark_ticker):
+    """
+    metrics is expected to be {"unhedged": {...}, "hedged": {...}, "put_stats": {...}}.
+    Rows must match template's getStat(section, metric) lookups:
+    section in {"Info", "Unhedged", "Hedged", "Put/Hedge Stats"}.
+    """
     rows = [
         {"section": "Info", "metric": "frequency", "value": frequency, "description": ""},
         {"section": "Info", "metric": "risk_frequency", "value": risk_frequency, "description": ""},
@@ -79,20 +67,25 @@ def build_stats_records(metrics, frequency, risk_frequency, benchmark_ticker):
         {"section": "Info", "metric": "Beta", "value": None, "description": ""},
     ]
 
-    for section_label in ["Unhedged", "Hedged"]:
-        for k in ["annualised_return", "total_cumulative", "sharpe", "sortino",
-                  "max_drawdown", "calmar", "var95", "hit_rate",
-                  "best_rolling_cagr", "worst_rolling_cagr"]:
-            rows.append({"section": section_label, "metric": k, "value": metrics.get(k), "description": ""})
+    metric_keys = [
+        "annualised_return", "total_cumulative", "sharpe", "sortino",
+        "max_drawdown", "calmar", "var_95", "hit_rate", "std_period_return",
+        "best_rolling_cagr", "worst_rolling_cagr",
+        "best_period", "best_period_return", "worst_period", "worst_period_return",
+    ]
 
-        bm = metrics.get("benchmark")
+    for section_label, key in [("Unhedged", "unhedged"), ("Hedged", "hedged")]:
+        m = metrics.get(key, {}) or {}
+        for k in metric_keys:
+            rows.append({"section": section_label, "metric": k, "value": m.get(k), "description": ""})
+        bm = m.get("benchmark")
         if bm:
             for k, v in bm.items():
                 rows.append({"section": f"{section_label} vs {benchmark_ticker}", "metric": k, "value": v, "description": ""})
 
-    # Put/Hedge stats placeholder — zeroed for long-only
-    for k in ["total_premium_paid", "total_payoff", "net_hedge_pnl", "n_exercised"]:
-        rows.append({"section": "Put/Hedge Stats", "metric": k, "value": 0.0, "description": "No hedge overlay (long-only)"})
+    put_stats = metrics.get("put_stats", {}) or {}
+    for k, v in put_stats.items():
+        rows.append({"section": "Put/Hedge Stats", "metric": k, "value": v, "description": ""})
 
     return rows
 
@@ -105,16 +98,13 @@ def generate_report_html(
     benchmark_ticker: str = "SPX",
     template_path: str = TEMPLATE_PATH,
 ):
-    """
-    Returns the fully rendered HTML report as a string.
-    """
     results_df = results_df.copy()
     if "period" in results_df.columns:
         results_df["period"] = results_df["period"].astype(str)
         results_df = results_df.sort_values("period").reset_index(drop=True)
 
     stats_records = sanitise_for_json(build_stats_records(metrics, frequency, risk_frequency, benchmark_ticker))
-    period_records = sanitise_for_json(build_period_records_for_template(results_df))
+    period_records = sanitise_for_json(build_period_records(results_df))
     missing_records = []
 
     stats_js = json.dumps(stats_records, ensure_ascii=False)
