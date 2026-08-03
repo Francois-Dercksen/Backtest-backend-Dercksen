@@ -16,6 +16,15 @@ def sanitise_metrics(d):
     return d
 
 
+def parse_pct(val, default=0.0):
+    if val is None or val == "":
+        return default
+    try:
+        return float(str(val).replace("%", "").strip()) / 100.0
+    except ValueError:
+        return default
+
+
 def create_app():
     app = Flask(__name__)
     CORS(app)  # allow the Cloudflare Pages frontend (different origin) to call this API
@@ -35,7 +44,29 @@ def create_app():
             end_year, end_month = [int(x) for x in end_date.split("-")]
 
             weight_str = payload.get("weight", "100%")
-            weight_pct = float(str(weight_str).replace("%", "").strip()) / 100.0
+            weight_pct = parse_pct(weight_str, default=1.0)
+
+            long_put_payload = payload.get("long_put")
+            long_put = None
+            if long_put_payload:
+                strike_pct = parse_pct(long_put_payload.get("strike"), default=0.90)
+                otm_pct = 1 - strike_pct
+                premium_pct = parse_pct(long_put_payload.get("premium"), default=0.0419)
+                notional_method = long_put_payload.get("notional_method", "real-beta")
+
+                custom_beta = None
+                if notional_method == "custom":
+                    try:
+                        custom_beta = float(long_put_payload.get("custom_beta"))
+                    except (TypeError, ValueError):
+                        custom_beta = 1.0
+
+                long_put = {
+                    "otm_pct": otm_pct,
+                    "premium_pct": premium_pct,
+                    "notional_method": notional_method,
+                    "custom_beta": custom_beta,
+                }
 
             results_df, metrics = run_long_only_backtest(
                 start_year=start_year,
@@ -43,6 +74,7 @@ def create_app():
                 end_year=end_year,
                 end_month=end_month,
                 weight_pct=weight_pct,
+                long_put=long_put,
             )
 
             html = generate_report_html(
@@ -54,11 +86,14 @@ def create_app():
             )
 
             clean_metrics = sanitise_metrics(metrics)
+            primary_key = "hedged" if long_put else "unhedged"
+            primary_metrics = clean_metrics.get(primary_key) or {}
 
             return jsonify({
                 "name": payload.get("name", "Untitled Backtest"),
-                "metrics": clean_metrics.get("unhedged"),
-                "benchmark": (clean_metrics.get("unhedged") or {}).get("benchmark"),
+                "metrics": primary_metrics,
+                "benchmark": primary_metrics.get("benchmark"),
+                "put_stats": clean_metrics.get("put_stats"),
                 "dashboard_html": html,
             })
 
@@ -67,6 +102,7 @@ def create_app():
 
     @app.route("/api/portfolios", methods=["GET"])
     def list_portfolios():
+        # Placeholder: hardcoded until Data tab uploads are wired to a real store
         return jsonify({"portfolios": ["BAM_f7_default"]})
 
     return app
