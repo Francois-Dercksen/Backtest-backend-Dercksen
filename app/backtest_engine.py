@@ -2,9 +2,11 @@
 backtest_engine.py
 
 Core backtesting logic, ported from H1_backtest_hedge.py.
-Long-only mode: hedge overlay is neutralised (premium=0, payoff=0)
-so unhedged metrics are the long-only results, and "hedged" fields
-mirror the unhedged ones since there is no option overlay yet.
+Supports long-only (no hedge) and long-only + long put overlay modes.
+Notional matching for the put overlay supports three modes:
+  - "real-beta": single beta computed over the full backtest window
+  - "dynamic-beta": beta recalculated each period using only prior periods
+  - "custom": fixed user-supplied beta value
 """
 
 import os
@@ -316,6 +318,104 @@ def load_portfolio_csv(path):
     return portfolio
 
 
+# ---------- LONG PUT OVERLAY ----------
+def compute_full_period_beta(port_returns, spx_returns):
+    common = port_returns.index.intersection(spx_returns.index)
+    if len(common) < 2:
+        return np.nan
+    p = port_returns.loc[common].values
+    s = spx_returns.loc[common].values
+    cov = np.cov(p, s)
+    return cov[0, 1] / cov[1, 1] if cov[1, 1] != 0 else np.nan
+
+
+def compute_dynamic_beta_series(port_returns, spx_returns):
+    """
+    For each period, beta uses only periods strictly before it (expanding window).
+    Returns a dict {period: beta_or_nan}.
+    """
+    common = sorted(port_returns.index.intersection(spx_returns.index))
+    betas = {}
+    for i, period in enumerate(common):
+        if i < 2:
+            betas[period] = np.nan
+            continue
+        hist_periods = common[:i]
+        p = port_returns.loc[hist_periods].values
+        s = spx_returns.loc[hist_periods].values
+        cov = np.cov(p, s)
+        betas[period] = cov[0, 1] / cov[1, 1] if cov[1, 1] != 0 else np.nan
+    return betas
+
+
+def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, custom_beta=None):
+    """
+    Adds protective put P&L on top of the long-only results_df.
+    otm_pct: e.g. 0.10 means strike = 90% of spot (10% OTM).
+    premium_pct: annual premium as % of notional, e.g. 0.0419.
+    notional_method: "real-beta" | "dynamic-beta" | "custom".
+    Returns results_df with hedge fields populated.
+    """
+    results_df = results_df.copy()
+
+    port_series = results_df.set_index("period")["portfolio_return_adjusted"]
+    spx_series = results_df.set_index("period")["spx_return"].dropna()
+
+    if notional_method == "real-beta":
+        beta_val = compute_full_period_beta(port_series, spx_series)
+        beta_map = {p: beta_val for p in results_df["period"]}
+    elif notional_method == "dynamic-beta":
+        beta_map = compute_dynamic_beta_series(port_series, spx_series)
+    elif notional_method == "custom":
+        beta_val = custom_beta if custom_beta is not None else 1.0
+        beta_map = {p: beta_val for p in results_df["period"]}
+    else:
+        raise ValueError(f"Unknown notional_method {notional_method!r}")
+
+    strike_pct = 1 - otm_pct  # e.g. otm=0.10 -> strike at 90% of spot
+
+    exercised_list, premium_list, payoff_list, net_pnl_list, hedged_ret_list = [], [], [], [], []
+
+    for _, row in results_df.iterrows():
+        period = row["period"]
+        spx_ret = row["spx_return"]
+        port_ret = row["portfolio_return_adjusted"]
+        beta = beta_map.get(period, np.nan)
+
+        if pd.isna(beta) or pd.isna(spx_ret):
+            exercised_list.append(False)
+            premium_list.append(0.0)
+            payoff_list.append(0.0)
+            net_pnl_list.append(0.0)
+            hedged_ret_list.append(port_ret)
+            continue
+
+        notional = beta
+        premium_paid = premium_pct * notional
+
+        spx_level_end = 1 + spx_ret
+        itm = spx_level_end < strike_pct
+        payoff = max(strike_pct - spx_level_end, 0.0) * notional if itm else 0.0
+
+        net_pnl = payoff - premium_paid
+        hedged_ret = port_ret + net_pnl
+
+        exercised_list.append(bool(itm))
+        premium_list.append(premium_paid)
+        payoff_list.append(payoff)
+        net_pnl_list.append(net_pnl)
+        hedged_ret_list.append(hedged_ret)
+
+    results_df["exercised"] = exercised_list
+    results_df["premium_paid_pct_initial"] = premium_list
+    results_df["payoff_pct_initial"] = payoff_list
+    results_df["net_hedge_pnl_pct_port"] = net_pnl_list
+    results_df["hedged_return"] = hedged_ret_list
+    results_df["hedged_cumulative_return"] = (1 + results_df["hedged_return"]).cumprod() - 1
+
+    return results_df
+
+
 def run_long_only_backtest(
     start_year, start_month, end_year, end_month,
     input_dir=INPUT_DIR,
@@ -327,12 +427,21 @@ def run_long_only_backtest(
     risk_frequency=RISK_FREQUENCY,
     rolling_window=ROLLING_WINDOW,
     weight_pct=1.0,
+    long_put=None,
 ):
     """
-    Runs the long-only portfolio backtest (hedge overlay disabled).
-    Returns (results_df, metrics_dict). results_df includes a
-    spx_return column per period so the report template's benchmark
-    comparisons and charts render correctly even with no hedge.
+    Runs the long-only portfolio backtest, optionally with a long put overlay.
+
+    long_put: optional dict {
+        "otm_pct": float,            # e.g. 0.10 for 10% OTM
+        "premium_pct": float,        # e.g. 0.0419
+        "notional_method": str,      # "real-beta" | "dynamic-beta" | "custom"
+        "custom_beta": float|None,
+    }
+    If None, hedged fields simply mirror unhedged fields (no overlay).
+
+    Returns (results_df, metrics_dict) where metrics_dict has keys
+    "unhedged", "hedged", "put_stats".
     """
     ppy = periods_per_year(frequency)
 
@@ -438,12 +547,21 @@ def run_long_only_backtest(
     results_df = pd.DataFrame(results).sort_values("period").reset_index(drop=True)
     results_df["cumulative_return"] = (1 + results_df["portfolio_return_adjusted"]).cumprod() - 1
 
-    results_df["exercised"] = False
-    results_df["premium_paid_pct_initial"] = 0.0
-    results_df["payoff_pct_initial"] = 0.0
-    results_df["net_hedge_pnl_pct_port"] = 0.0
-    results_df["hedged_return"] = results_df["portfolio_return_adjusted"]
-    results_df["hedged_cumulative_return"] = results_df["cumulative_return"]
+    if long_put is not None:
+        results_df = apply_long_put_overlay(
+            results_df,
+            otm_pct=long_put["otm_pct"],
+            premium_pct=long_put["premium_pct"],
+            notional_method=long_put["notional_method"],
+            custom_beta=long_put.get("custom_beta"),
+        )
+    else:
+        results_df["exercised"] = False
+        results_df["premium_paid_pct_initial"] = 0.0
+        results_df["payoff_pct_initial"] = 0.0
+        results_df["net_hedge_pnl_pct_port"] = 0.0
+        results_df["hedged_return"] = results_df["portfolio_return_adjusted"]
+        results_df["hedged_cumulative_return"] = results_df["cumulative_return"]
 
     unhedged_metrics = compute_metrics(
         results_df, "portfolio_return_adjusted", frequency, risk_frequency, rolling_window, ppy,
@@ -467,16 +585,30 @@ def run_long_only_backtest(
     if bench_hedged is not None:
         hedged_metrics["benchmark"] = bench_hedged[0]
 
+    n_years = len(results_df)
+    n_exercised = int(results_df["exercised"].sum())
+    total_premium = float(results_df["premium_paid_pct_initial"].sum())
+    total_payoff = float(results_df["payoff_pct_initial"].sum())
+    net_cost = total_premium - total_payoff
+    corr_eff = None
+    if results_df["net_hedge_pnl_pct_port"].std() > 0:
+        corr_eff = float(np.corrcoef(
+            results_df["portfolio_return_adjusted"], results_df["net_hedge_pnl_pct_port"]
+        )[0, 1])
+    dd_reduction = None
+    if pd.notna(unhedged_metrics["max_drawdown"]) and pd.notna(hedged_metrics["max_drawdown"]):
+        dd_reduction = float(abs(unhedged_metrics["max_drawdown"]) - abs(hedged_metrics["max_drawdown"]))
+
     put_stats = {
-        "exercise_rate": 0.0,
-        "n_exercised": 0,
-        "n_years": len(results_df),
-        "total_premium_paid_pct_initial": 0.0,
-        "total_payoff_received_pct_initial": 0.0,
-        "net_hedge_cost_pct_initial": 0.0,
-        "avg_annual_premium_drag": 0.0,
-        "hedge_effectiveness_corr": None,
-        "drawdown_reduction": 0.0,
+        "exercise_rate": (n_exercised / n_years) if n_years else 0.0,
+        "n_exercised": n_exercised,
+        "n_years": n_years,
+        "total_premium_paid_pct_initial": total_premium,
+        "total_payoff_received_pct_initial": total_payoff,
+        "net_hedge_cost_pct_initial": net_cost,
+        "avg_annual_premium_drag": total_premium / n_years if n_years else 0.0,
+        "hedge_effectiveness_corr": corr_eff,
+        "drawdown_reduction": dd_reduction,
         "avg_holdings": float(results_df["n_holdings"].mean()),
         "avg_turnover": None,
     }
