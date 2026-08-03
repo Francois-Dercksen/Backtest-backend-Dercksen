@@ -24,6 +24,9 @@ FREQUENCY = "annual"
 RISK_FREQUENCY = "monthly"
 ROLLING_WINDOW = 3
 
+TRANSACTION_COST_BPS = 10.0  # charged once at purchase; charged again ONLY if exercised (ITM at expiry)
+COUNTERPARTY_HAIRCUT = 0.0   # % of payoff lost to settlement friction (0 = none)
+
 
 def parse_period_col(col: str):
     col = col.strip()
@@ -258,10 +261,38 @@ def compute_benchmark_stats(results_df, return_col, index_df, benchmark_ticker, 
     bench_cagr = cagr(bench_cum, n_common, ppy)
     alpha = annualised_return - bench_cagr
 
+    risk_ppy = periods_per_year(frequency)
+    tracking_error = float(np.std(port_aligned.values - bench_aligned.values, ddof=1)) * np.sqrt(risk_ppy)
+    info_ratio = alpha / tracking_error if tracking_error > 0 else np.nan
+
     cov_matrix = np.cov(port_aligned.values, bench_aligned.values)
     beta_est = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else np.nan
 
-    return {"n_common": n_common, "cagr": bench_cagr, "alpha": alpha, "beta": beta_est}, bench_series
+    up_idx = bench_aligned[bench_aligned > 0].index
+    down_idx = bench_aligned[bench_aligned < 0].index
+    up_capture = down_capture = np.nan
+    if len(up_idx):
+        pu = cagr(np.prod(1 + port_aligned.loc[up_idx]) - 1, len(up_idx), ppy)
+        bu = cagr(np.prod(1 + bench_aligned.loc[up_idx]) - 1, len(up_idx), ppy)
+        up_capture = pu / bu if bu != 0 else np.nan
+    if len(down_idx):
+        pd_ = cagr(np.prod(1 + port_aligned.loc[down_idx]) - 1, len(down_idx), ppy)
+        bd = cagr(np.prod(1 + bench_aligned.loc[down_idx]) - 1, len(down_idx), ppy)
+        down_capture = pd_ / bd if bd != 0 else np.nan
+
+    outperf_rate = float((port_aligned.values > bench_aligned.values).sum() / n_common)
+
+    return {
+        "n_common": n_common,
+        "cagr": bench_cagr,
+        "alpha": alpha,
+        "tracking_error": tracking_error,
+        "info_ratio": info_ratio,
+        "beta": beta_est,
+        "up_capture": up_capture,
+        "down_capture": down_capture,
+        "outperf_rate": outperf_rate,
+    }, bench_series
 
 
 def get_normalised_ticker_map(returns_df_index):
@@ -348,12 +379,15 @@ def compute_dynamic_beta_series(port_returns, spx_returns):
     return betas
 
 
-def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, custom_beta=None):
+def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, custom_beta=None,
+                            txn_cost_bps=TRANSACTION_COST_BPS, counterparty_haircut=COUNTERPARTY_HAIRCUT):
     """
     Adds protective put P&L on top of the long-only results_df.
     otm_pct: e.g. 0.10 means strike = 90% of spot (10% OTM).
     premium_pct: annual premium as % of notional, e.g. 0.0419.
     notional_method: "real-beta" | "dynamic-beta" | "custom".
+    txn_cost_bps: one-way transaction cost in bps, charged once at purchase and again if exercised.
+    counterparty_haircut: fraction of payoff lost to settlement friction (0 = none).
     Returns results_df with hedge fields populated.
     """
     results_df = results_df.copy()
@@ -373,8 +407,9 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
         raise ValueError(f"Unknown notional_method {notional_method!r}")
 
     strike_pct = 1 - otm_pct  # e.g. otm=0.10 -> strike at 90% of spot
+    txn_unit = txn_cost_bps / 10000.0
 
-    exercised_list, premium_list, payoff_list, net_pnl_list, hedged_ret_list = [], [], [], [], []
+    exercised_list, premium_list, payoff_list, txn_list, net_pnl_list, hedged_ret_list = [], [], [], [], [], []
 
     for _, row in results_df.iterrows():
         period = row["period"]
@@ -386,6 +421,7 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
             exercised_list.append(False)
             premium_list.append(0.0)
             payoff_list.append(0.0)
+            txn_list.append(0.0)
             net_pnl_list.append(0.0)
             hedged_ret_list.append(port_ret)
             continue
@@ -395,20 +431,26 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
 
         spx_level_end = 1 + spx_ret
         itm = spx_level_end < strike_pct
-        payoff = max(strike_pct - spx_level_end, 0.0) * notional if itm else 0.0
+        payoff_raw = max(strike_pct - spx_level_end, 0.0) * (1 - counterparty_haircut)
+        payoff = payoff_raw * notional
 
-        net_pnl = payoff - premium_paid
+        txn_cost_pct = txn_unit * (2 if itm else 1)
+        txn_cost = txn_cost_pct * notional
+
+        net_pnl = payoff - premium_paid - txn_cost
         hedged_ret = port_ret + net_pnl
 
         exercised_list.append(bool(itm))
         premium_list.append(premium_paid)
         payoff_list.append(payoff)
+        txn_list.append(txn_cost)
         net_pnl_list.append(net_pnl)
         hedged_ret_list.append(hedged_ret)
 
     results_df["exercised"] = exercised_list
     results_df["premium_paid_pct_initial"] = premium_list
     results_df["payoff_pct_initial"] = payoff_list
+    results_df["txn_cost_pct_initial"] = txn_list
     results_df["net_hedge_pnl_pct_port"] = net_pnl_list
     results_df["hedged_return"] = hedged_ret_list
     results_df["hedged_cumulative_return"] = (1 + results_df["hedged_return"]).cumprod() - 1
@@ -437,6 +479,8 @@ def run_long_only_backtest(
         "premium_pct": float,        # e.g. 0.0419
         "notional_method": str,      # "real-beta" | "dynamic-beta" | "custom"
         "custom_beta": float|None,
+        "txn_cost_bps": float,       # optional, defaults to 10.0
+        "counterparty_haircut": float,  # optional, defaults to 0.0
     }
     If None, hedged fields simply mirror unhedged fields (no overlay).
 
@@ -464,6 +508,7 @@ def run_long_only_backtest(
 
     results = []
     monthly_port_rets = {}
+    tickers_by_period = {}
 
     for rebal_period in rebalance_periods:
         weight_period = period_start(rebal_period, frequency)
@@ -477,6 +522,7 @@ def run_long_only_backtest(
         weighted_returns, total_weight_used = [], 0.0
         monthly_weighted = {m: [] for m in sub_months}
         monthly_weights = {m: 0.0 for m in sub_months}
+        tickers_by_period[rebal_period] = set(port_group["ticker"].tolist())
 
         for _, prow in port_group.iterrows():
             ticker_norm = prow["ticker"]
@@ -554,11 +600,14 @@ def run_long_only_backtest(
             premium_pct=long_put["premium_pct"],
             notional_method=long_put["notional_method"],
             custom_beta=long_put.get("custom_beta"),
+            txn_cost_bps=long_put.get("txn_cost_bps", TRANSACTION_COST_BPS),
+            counterparty_haircut=long_put.get("counterparty_haircut", COUNTERPARTY_HAIRCUT),
         )
     else:
         results_df["exercised"] = False
         results_df["premium_paid_pct_initial"] = 0.0
         results_df["payoff_pct_initial"] = 0.0
+        results_df["txn_cost_pct_initial"] = 0.0
         results_df["net_hedge_pnl_pct_port"] = 0.0
         results_df["hedged_return"] = results_df["portfolio_return_adjusted"]
         results_df["hedged_cumulative_return"] = results_df["cumulative_return"]
@@ -569,7 +618,7 @@ def run_long_only_backtest(
     )
     hedged_metrics = compute_metrics(
         results_df, "hedged_return", frequency, risk_frequency, rolling_window, ppy,
-        monthly_returns_map=monthly_port_rets,
+        monthly_returns_map=None,  # matches original: no true monthly hedged-return series exists
     )
 
     bench_unhedged = compute_benchmark_stats(
@@ -584,6 +633,17 @@ def run_long_only_backtest(
         unhedged_metrics["benchmark"] = bench_unhedged[0]
     if bench_hedged is not None:
         hedged_metrics["benchmark"] = bench_hedged[0]
+
+    avg_holdings = float(results_df["n_holdings"].mean())
+    sorted_ps = sorted(tickers_by_period.keys())
+    turnover_rates = []
+    for i in range(1, len(sorted_ps)):
+        prev = tickers_by_period[sorted_ps[i - 1]]
+        curr = tickers_by_period[sorted_ps[i]]
+        union = len(prev | curr)
+        if union > 0:
+            turnover_rates.append((len(curr - prev) + len(prev - curr)) / union)
+    avg_turnover = float(np.mean(turnover_rates)) if turnover_rates else None
 
     n_years = len(results_df)
     n_exercised = int(results_df["exercised"].sum())
@@ -609,8 +669,8 @@ def run_long_only_backtest(
         "avg_annual_premium_drag": total_premium / n_years if n_years else 0.0,
         "hedge_effectiveness_corr": corr_eff,
         "drawdown_reduction": dd_reduction,
-        "avg_holdings": float(results_df["n_holdings"].mean()),
-        "avg_turnover": None,
+        "avg_holdings": avg_holdings,
+        "avg_turnover": avg_turnover,
     }
 
     return results_df, {
