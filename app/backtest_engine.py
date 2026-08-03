@@ -98,9 +98,13 @@ def cagr(cum_return, n_periods, ppy):
 
 
 def parse_val(val):
+    """
+    Converts European-style decimal strings (e.g. '1,23' meaning 1.23)
+    into floats. Matches the original H1_backtest_hedge.py logic exactly.
+    """
     if isinstance(val, str):
         try:
-            return float(val.replace(",", "").strip())
+            return float(val.replace(",", ".").strip())
         except ValueError:
             return np.nan
     return np.nan
