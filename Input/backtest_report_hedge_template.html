@@ -2,398 +2,275 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Hedged Portfolio Backtest Report</title>
+<title>DERCKSEN Backtest Report</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg:#f5f6fa; --card:#ffffff; --border:#e3e6ec; --text:#1c2130;
-    --muted:#6b7280; --accent:#3b5bfd; --green:#1fae7a; --red:#e5484d;
-    --amber:#e2a336; --purple:#8b5cf6;
+    --bg:#f5f6fa; --card:#ffffff; --border:#e3e6ec; --text:#1c2130; --muted:#6b7280;
+    --accent:#3b5bfd; --green:#1fae7a; --red:#e5484d; --amber:#e2a336; --purple:#8b5cf6;
   }
-  [data-theme="dark"] {
-    --bg:#0f1117; --card:#171a23; --border:#262a36; --text:#e8e9ee;
-    --muted:#9aa0ac; --accent:#4f8cff; --green:#35c98f; --red:#ff5c72;
-    --amber:#ffb547; --purple:#b98bff;
-  }
-  body { transition: background-color .2s ease, color .2s ease; }
-  .card, .panel { transition: background-color .2s ease, border-color .2s ease; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-  header { padding:28px 36px 6px; }
-  header h1 { margin:0 0 4px; font-size:23px; font-weight:700; }
-  header p { margin:0; color:var(--muted); font-size:13px; }
-  .wrap { padding:0 36px 48px; }
-  .tabs { display:flex; gap:6px; margin:18px 0 6px; border-bottom:1px solid var(--border); }
-  .tab-btn { background:none; border:none; padding:10px 18px; font-size:13.5px; font-weight:600; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; }
+  header { padding:24px 32px 6px; }
+  header h1 { margin:0 0 4px; font-size:21px; font-weight:700; }
+  header p { margin:0; color:var(--muted); font-size:12.5px; }
+  .wrap { padding:0 32px 40px; }
+  .tabs { display:flex; gap:4px; margin:16px 0 6px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .tab-btn { background:none; border:none; padding:9px 14px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; }
   .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
   .tab-panel { display:none; }
   .tab-panel.active { display:block; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin:18px 0 26px; }
-  .cards.headline .card { padding:20px 20px; }
-  .cards.headline .value { font-size:28px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px 18px; box-shadow:0 1px 2px rgba(20,20,43,.03); }
-  .card .label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:6px; }
-  .card .value { font-size:22px; font-weight:700; }
-  .card .sub { font-size:11px; color:var(--muted); margin-top:4px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0 24px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .card .label { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:5px; }
+  .card .value { font-size:20px; font-weight:700; }
+  .card .sub { font-size:10.5px; color:var(--muted); margin-top:3px; }
   .card.pos .value { color:var(--green); }
   .card.neg .value { color:var(--red); }
-  .section-title { font-size:15px; font-weight:700; margin:28px 0 10px; color:var(--text); border-left:3px solid var(--accent); padding-left:10px; }
-  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-  @media (max-width:1000px){ .grid2 { grid-template-columns:1fr; } }
-  .panel { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px 18px; box-shadow:0 1px 2px rgba(20,20,43,.03); }
-  .panel h3 { margin:0 0 2px; font-size:14px; font-weight:700; }
-  .panel .desc { color:var(--muted); font-size:11px; margin-bottom:10px; }
-  .panel.full { grid-column:1 / -1; }
-  canvas { max-height:320px; }
-  table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th, td { padding:8px 10px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
+  .section-title { font-size:14px; font-weight:700; margin:24px 0 10px; border-left:3px solid var(--accent); padding-left:9px; }
+  .leg-heading { font-size:16px; font-weight:700; margin:0 0 4px; }
+  .leg-sub { font-size:11.5px; color:var(--muted); margin:0 0 10px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:1000px) { .grid2 { grid-template-columns:1fr; } }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .panel h3 { margin:0 0 2px; font-size:13px; font-weight:700; }
+  .panel .desc { color:var(--muted); font-size:10.5px; margin-bottom:8px; }
+  .panel.full { grid-column:1/-1; }
+  canvas { max-height:300px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { padding:7px 9px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
   th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
-  tr:hover td { background:rgba(59,91,253,0.04); }
-  .tablewrap { max-height:560px; overflow:auto; }
-  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  .tablewrap { max-height:520px; overflow:auto; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:10.5px; font-weight:600; }
   .pill.yes { background:rgba(229,72,77,.12); color:var(--red); }
   .pill.no { background:rgba(31,174,122,.12); color:var(--green); }
-
-  .theme-toggle { position:absolute; top:28px; right:36px; background:var(--card); border:1px solid var(--border);
-    color:var(--text); border-radius:20px; padding:8px 16px; font-size:12.5px; font-weight:600; cursor:pointer;
-    display:flex; align-items:center; gap:6px; box-shadow:0 1px 2px rgba(20,20,43,.06); }
-  .theme-toggle:hover { border-color:var(--accent); }
-  header { position:relative; }
+  .leg-block { margin-bottom:36px; padding-bottom:8px; border-bottom:1px solid var(--border); }
 </style>
 </head>
 <body>
 <header>
-  <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙 Dark Mode</button>
-  <h1>Hedged Portfolio Backtest Report</h1>
-  <p>Protective Put Overlay on <span id="benchLabel">__BENCH__</span> &middot; OTM <span id="otmLabel">--</span> &middot; Beta <span id="betaLabel">--</span> &middot; Frequency: <span id="freqLabel">__FREQUENCY__</span> &middot; Risk basis: <span id="riskLabel">__RISK_FREQUENCY__</span></p>
+  <h1>DERCKSEN Backtest Report</h1>
+  <p>Frequency: <span id="freqLabel">__FREQUENCY__</span> &middot; Risk basis: <span id="riskLabel">__RISK_FREQUENCY__</span> &middot; Benchmark: <span id="benchLabel">__BENCHMARK_TICKER__</span></p>
 </header>
-
 <div class="wrap">
-  <div class="tabs">
-    <button class="tab-btn active" data-tab="overview">Overview</button>
-    <button class="tab-btn" data-tab="table">Year-by-Year Results</button>
+  <div class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="tab-overview">Overview</button>
+    <button class="tab-btn" data-tab="tab-netportfolio">Net Portfolio</button>
+    <button class="tab-btn" data-tab="tab-legs">Strategy Legs</button>
+    <button class="tab-btn" data-tab="tab-table">Period Table</button>
   </div>
 
   <div class="tab-panel active" id="tab-overview">
+    <div class="section-title">Net Portfolio Summary</div>
+    <div class="cards" id="headlineCards"></div>
+    <div class="section-title">Benchmark Comparison</div>
+    <div class="cards" id="benchmarkCards"></div>
+  </div>
 
-    <div class="cards headline" id="headlineCards"></div>
-
-    <div class="section-title">Hedged Portfolio</div>
-    <div class="cards" id="hedgedCards"></div>
-
-    <div class="section-title">Long-Only Portfolio (Unhedged)</div>
-    <div class="cards" id="unhedgedCards"></div>
-
-    <div class="section-title">Put / Hedge Statistics</div>
-    <div class="cards" id="putCards"></div>
-
-    <div class="section-title">Returns</div>
-    <div class="grid2">
-      <div class="panel full">
-        <h3>Annual Returns: SPX vs Unhedged vs Puts vs Hedged</h3>
-        <div class="desc">Period-by-period return comparison across all four return streams</div>
-        <canvas id="returnsChart"></canvas>
-      </div>
-    </div>
-
+  <div class="tab-panel" id="tab-netportfolio">
     <div class="section-title">Performance</div>
     <div class="grid2">
-      <div class="panel">
-        <h3>Cumulative Return</h3>
-        <div class="desc">Hedged vs unhedged vs benchmark, wealth index starting at 0%</div>
-        <canvas id="cumChart"></canvas>
-      </div>
-      <div class="panel">
-        <h3>Drawdown</h3>
-        <div class="desc">Peak-to-trough decline, hedged vs unhedged</div>
-        <canvas id="drawdownChart"></canvas>
-      </div>
+      <div class="panel"><h3>Cumulative Return</h3><div class="desc">Net portfolio vs benchmark, wealth index starting at 0</div><canvas id="cumChart"></canvas></div>
+      <div class="panel"><h3>Drawdown</h3><div class="desc">Peak-to-trough decline of the net portfolio</div><canvas id="drawdownChart"></canvas></div>
     </div>
-
+    <div class="section-title">Capital &amp; Financing</div>
     <div class="grid2">
-      <div class="panel">
-        <h3>Annual Alpha vs SPX</h3>
-        <div class="desc">Hedged portfolio return minus benchmark per year</div>
-        <canvas id="alphaChart"></canvas>
-      </div>
-      <div class="panel">
-        <h3>Holdings per Period</h3>
-        <div class="desc">Number of positions held each period</div>
-        <canvas id="holdingsChart"></canvas>
-      </div>
+      <div class="panel"><h3>Net Gearing</h3><div class="desc">Total capital allocated across gearing-eligible legs (1.0 = fully invested; above 1.0 = borrowing; below 1.0 = idle cash)</div><canvas id="gearingChart"></canvas></div>
+      <div class="panel" id="shortExposurePanel"><h3>Short Exposure</h3><div class="desc">Notional exposure from Short Call / Short Put legs (no margin modelled)</div><canvas id="shortExposureChart"></canvas></div>
     </div>
+  </div>
 
-    <div class="section-title">Hedge Mechanics</div>
-    <div class="grid2">
-      <div class="panel">
-        <h3>Premium Paid vs Payoff Received</h3>
-        <div class="desc">Annual option cash flows, % of initial investment</div>
-        <canvas id="premiumPayoffChart"></canvas>
-      </div>
-      <div class="panel">
-        <h3>Rolling Net Hedge Cost</h3>
-        <div class="desc">Cumulative premium, payoff, and net cost, % of initial investment</div>
-        <canvas id="cumHedgeCostChart"></canvas>
-      </div>
-    </div>
-
+  <div class="tab-panel" id="tab-legs">
+    <div id="legsContainer"></div>
   </div>
 
   <div class="tab-panel" id="tab-table">
     <div class="panel">
       <div class="tablewrap">
         <table id="resultsTable">
-          <thead>
-            <tr>
-              <th>Year</th><th>Port Return</th><th>SPX Return</th><th>Exercised</th>
-              <th>Premium Paid</th><th>Payoff</th><th>Net Hedge PnL</th>
-              <th>Hedged Return</th><th>Unhedged Cum</th><th>Hedged Cum</th><th>Holdings</th>
-            </tr>
-          </thead>
+          <thead><tr>
+            <th>Period</th><th>Net Return</th><th>Gearing</th><th>Financing</th><th>Cumulative</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
       </div>
     </div>
   </div>
-
 </div>
 
 <script>
-let chartInstancesReady = false;
+const NET_PERIODS = __NET_PERIODS_JSON__;
+const NET_METRICS = __NET_METRICS_JSON__;
+const LEGS = __LEGS_JSON__;
 
-function applyTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
-  const btn = document.getElementById("themeToggle");
-  btn.innerHTML = theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode";
-  localStorage.setItem("hedgeReportTheme", theme);
-  if (typeof buildCharts === "function" && chartInstancesReady) buildCharts();
-}
-function toggleTheme() {
-  const current = document.documentElement.getAttribute("data-theme") || "light";
-  applyTheme(current === "dark" ? "light" : "dark");
-}
-applyTheme(localStorage.getItem("hedgeReportTheme") || "light");
+function fmtPct(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? '--' : (v*100).toFixed(d)+'%'; }
+function fmtNum(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? '--' : Number(v).toFixed(d); }
 
-const RESULTS = __PERIODS_JSON__;
-const STATS = __STATS_JSON__;
-
-function getStat(section, metric) {
-  const row = STATS.find(r => (r.section||"").trim() === section && (r.metric||"").trim() === metric);
-  return row ? row.value : null;
-}
-function fmtPct(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? "--" : (v*100).toFixed(d)+"%"; }
-function fmtNum(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? "--" : Number(v).toFixed(d); }
-function num(v) { const n = parseFloat(v); return isNaN(n) ? null : n; }
-
-const otm = num(getStat("Info","OTM")) ?? num(getStat("Info","otm"));
-const beta = num(getStat("Info","Beta")) ?? num(getStat("Info","beta"));
-document.getElementById("otmLabel").textContent = otm!==null ? (otm*100).toFixed(0)+"%" : "--";
-document.getElementById("betaLabel").textContent = beta!==null ? beta.toFixed(3) : "--";
-
-function card(container, label, value, sub, cls="") {
-  const div = document.createElement("div");
-  div.className = "card " + cls;
-  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div>`;
+function card(container, label, value, sub, cls) {
+  const div = document.createElement('div');
+  div.className = 'card ' + (cls || '');
+  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub||''}</div>`;
   container.appendChild(div);
 }
 
-// ── Headline (3 stats) ─────────────────────────────────────────────────
-const hCagr = num(getStat("Hedged","annualised_return"));
-const hMDD = num(getStat("Hedged","max_drawdown"));
-const nYearsHead = RESULTS.length;
-const headlineCards = document.getElementById("headlineCards");
-card(headlineCards, "Hedged CAGR", fmtPct(hCagr), "Geometric annualised return, incl. put overlay", hCagr>=0?"pos":"neg");
-card(headlineCards, "Hedged Max Drawdown", fmtPct(hMDD), "Peak-to-trough decline, hedged series", "neg");
-card(headlineCards, "Backtest Length", nYearsHead + " years", "Full years of history");
+/* ---------- HEADLINE / BENCHMARK CARDS ---------- */
+const headlineCards = document.getElementById('headlineCards');
+card(headlineCards, 'CAGR', fmtPct(NET_METRICS.annualised_return), 'Net portfolio annualised return', NET_METRICS.annualised_return>0?'pos':'neg');
+card(headlineCards, 'Max Drawdown', fmtPct(NET_METRICS.max_drawdown), 'Peak-to-trough decline', 'neg');
+card(headlineCards, 'Sharpe Ratio', fmtNum(NET_METRICS.sharpe), 'Return / volatility');
+card(headlineCards, 'Sortino Ratio', fmtNum(NET_METRICS.sortino), 'Return / downside deviation');
+card(headlineCards, 'Calmar Ratio', fmtNum(NET_METRICS.calmar), 'CAGR / |Max Drawdown|');
+card(headlineCards, 'VaR (95%)', fmtPct(NET_METRICS.var_95), '5th percentile period return', 'neg');
+card(headlineCards, 'Hit Rate', fmtPct(NET_METRICS.hit_rate), '% of periods with positive return');
+card(headlineCards, 'Avg Turnover', fmtPct(NET_METRICS.avg_turnover), 'Long portfolio holdings turnover');
+card(headlineCards, 'Backtest Length', (NET_METRICS.n_periods ?? '--') + ' periods', '');
 
-// ── Hedged cards ─────────────────────────────────────────────────────────
-const hSharpe = num(getStat("Hedged","sharpe"));
-const hSortino = num(getStat("Hedged","sortino"));
-const hCalmar = num(getStat("Hedged","calmar"));
-const hVar = num(getStat("Hedged","var_95"));
-const hHit = num(getStat("Hedged","hit_rate"));
-const hStd = num(getStat("Hedged","std_period_return"));
-const hBestRoll = num(getStat("Hedged","best_rolling_cagr"));
-const hWorstRoll = num(getStat("Hedged","worst_rolling_cagr"));
-const hBestYr = getStat("Hedged","best_period");
-const hBestYrRet = num(getStat("Hedged","best_period_return"));
-const hWorstYr = getStat("Hedged","worst_period");
-const hWorstYrRet = num(getStat("Hedged","worst_period_return"));
+const bm = NET_METRICS.benchmark;
+const benchmarkCards = document.getElementById('benchmarkCards');
+if (bm) {
+  card(benchmarkCards, 'Alpha', fmtPct(bm.alpha), 'Excess annualised return vs benchmark', bm.alpha>0?'pos':'neg');
+  card(benchmarkCards, 'Beta', fmtNum(bm.beta, 3), 'Sensitivity to benchmark');
+  card(benchmarkCards, 'Tracking Error', fmtPct(bm.tracking_error), 'Annualised stdev of active return');
+  card(benchmarkCards, 'Information Ratio', fmtNum(bm.info_ratio, 3), 'Alpha / tracking error');
+  card(benchmarkCards, 'Up Capture', fmtPct(bm.up_capture), 'Capture of benchmark up-periods');
+  card(benchmarkCards, 'Down Capture', fmtPct(bm.down_capture), 'Capture of benchmark down-periods', bm.down_capture<1?'pos':'neg');
+  card(benchmarkCards, 'Outperformance Rate', fmtPct(bm.outperf_rate), '% of periods beating benchmark');
+} else {
+  benchmarkCards.innerHTML = '<p style="color:var(--muted);font-size:12px;">No benchmark overlap available for this backtest window.</p>';
+}
 
-const hedgedCards = document.getElementById("hedgedCards");
-card(hedgedCards, "Sharpe Ratio", fmtNum(hSharpe), "Hedged return / hedged volatility");
-card(hedgedCards, "Sortino Ratio", fmtNum(hSortino), "Downside-risk adjusted");
-card(hedgedCards, "Calmar Ratio", fmtNum(hCalmar), "CAGR / |Max Drawdown|");
-card(hedgedCards, "VaR 95%", fmtPct(hVar), "5th percentile annual return", "neg");
-card(hedgedCards, "Hit Rate", fmtPct(hHit), "% of years with positive hedged return");
-card(hedgedCards, "Std Dev (annual)", fmtPct(hStd), "Sample std dev of annual returns");
-card(hedgedCards, "Best 3-yr Rolling CAGR", fmtPct(hBestRoll), "Best annualised return, any 3 consecutive years", "pos");
-card(hedgedCards, "Worst 3-yr Rolling CAGR", fmtPct(hWorstRoll), "Worst annualised return, any 3 consecutive years", "neg");
-card(hedgedCards, `Best Year (${hBestYr ?? "--"})`, fmtPct(hBestYrRet), "Highest single-year hedged return", "pos");
-card(hedgedCards, `Worst Year (${hWorstYr ?? "--"})`, fmtPct(hWorstYrRet), "Lowest single-year hedged return", "neg");
-
-// ── Unhedged (reference) cards ───────────────────────────────────────────
-const uCagr = num(getStat("Unhedged","annualised_return"));
-const uMDD = num(getStat("Unhedged","max_drawdown"));
-const uSharpe = num(getStat("Unhedged","sharpe"));
-const uSortino = num(getStat("Unhedged","sortino"));
-
-const unhedgedCards = document.getElementById("unhedgedCards");
-card(unhedgedCards, "Unhedged CAGR", fmtPct(uCagr), "Long-only portfolio");
-card(unhedgedCards, "Unhedged Sharpe", fmtNum(uSharpe), "For comparison");
-card(unhedgedCards, "Unhedged Sortino", fmtNum(uSortino), "Downside-risk adjusted, unhedged");
-card(unhedgedCards, "Unhedged Max Drawdown", fmtPct(uMDD), "For comparison", "neg");
-
-// ── Put / Hedge stat cards ───────────────────────────────────────────────
-const exRate = num(getStat("Put/Hedge Stats","exercise_rate"));
-const nExercised = num(getStat("Put/Hedge Stats","n_exercised"));
-const nYears = num(getStat("Put/Hedge Stats","n_years"));
-const totalPremInit = num(getStat("Put/Hedge Stats","total_premium_paid_pct_initial"));
-const totalPayoffInit = num(getStat("Put/Hedge Stats","total_payoff_received_pct_initial"));
-const netCostInit = num(getStat("Put/Hedge Stats","net_hedge_cost_pct_initial"));
-const avgDrag = num(getStat("Put/Hedge Stats","avg_annual_premium_drag"));
-const corrEff = num(getStat("Put/Hedge Stats","hedge_effectiveness_corr"));
-const ddReduction = num(getStat("Put/Hedge Stats","drawdown_reduction"));
-const avgHoldings = num(getStat("Put/Hedge Stats","avg_holdings"));
-const avgTurnover = num(getStat("Put/Hedge Stats","avg_turnover"));
-
-const putCards = document.getElementById("putCards");
-card(putCards, "Exercise Rate", fmtPct(exRate), `${nExercised ?? "--"} of ${nYears ?? "--"} years ITM`);
-card(putCards, "Total Premium Paid", fmtPct(totalPremInit), "% of initial investment, cumulative");
-card(putCards, "Total Payoff Received", fmtPct(totalPayoffInit), "% of initial investment, cumulative");
-card(putCards, "Net Hedge Cost", fmtPct(netCostInit), "% of initial investment", netCostInit>0?"neg":"pos");
-card(putCards, "Avg Annual Premium Drag", fmtPct(avgDrag), "Average yearly cost of insurance");
-card(putCards, "Hedge Effectiveness", fmtNum(corrEff,3), "Corr(port return, net hedge P&L)", corrEff<0?"pos":"neg");
-card(putCards, "Drawdown Reduction", fmtPct(ddReduction), "Unhedged MDD − Hedged MDD", ddReduction>=0?"pos":"neg");
-card(putCards, "Avg Holdings", fmtNum(avgHoldings,1), "Mean number of positions held");
-card(putCards, "Avg Turnover", fmtPct(avgTurnover), "Avg (added+removed)/union, period-over-period");
-
-// ── Chart helpers ────────────────────────────────────────────────────────
-const labels = RESULTS.map(r => r.period);
+/* ---------- CHARTS ---------- */
+const labels = NET_PERIODS.map(r => r.period);
 let chartInstances = [];
+const baseOpts = {
+  responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+  scales:{ x:{grid:{color:'rgba(20,20,43,0.06)'}}, y:{grid:{color:'rgba(20,20,43,0.06)'}} },
+};
 
-function getThemeColors() {
-  const styles = getComputedStyle(document.documentElement);
-  return {
-    text: styles.getPropertyValue('--text').trim() || '#1c2130',
-    muted: styles.getPropertyValue('--muted').trim() || '#6b7280',
-    grid: document.documentElement.getAttribute('data-theme') === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(20,20,43,0.06)',
-  };
+chartInstances.push(new Chart(document.getElementById('cumChart'), {
+  type:'line', data:{ labels, datasets:[
+    { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25 },
+  ]},
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+function drawdownSeries(cumArr) {
+  let peak = -Infinity;
+  return cumArr.map(c => { const level=1+c; peak=Math.max(peak,level); return (level-peak)/peak*100; });
+}
+chartInstances.push(new Chart(document.getElementById('drawdownChart'), {
+  type:'line', data:{ labels, datasets:[
+    { label:'Drawdown', data: drawdownSeries(NET_PERIODS.map(r=>r.net_cumulative_return)), borderColor:'#e5484d', backgroundColor:'rgba(229,72,77,0.12)', fill:true, tension:0.2 },
+  ]},
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+chartInstances.push(new Chart(document.getElementById('gearingChart'), {
+  type:'bar', data:{ labels, datasets:[
+    { label:'Net Gearing', data: NET_PERIODS.map(r=>r.net_gearing), backgroundColor: NET_PERIODS.map(r=>r.net_gearing>1?'#e5484d':(r.net_gearing<1?'#e2a336':'#1fae7a')) },
+  ]},
+  options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Gearing: '+c.raw.toFixed(2)+'x'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'x'}}}},
+}));
+
+const hasShortExposure = NET_PERIODS.some(r => (r.short_exposure||0) !== 0);
+if (hasShortExposure) {
+  chartInstances.push(new Chart(document.getElementById('shortExposureChart'), {
+    type:'bar', data:{ labels, datasets:[
+      { label:'Short Exposure', data: NET_PERIODS.map(r=>r.short_exposure*100), backgroundColor:'#8b5cf6' },
+    ]},
+    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Exposure: '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+  }));
+} else {
+  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p style="color:var(--muted);font-size:12px;">No Short Call / Short Put legs active in this backtest.</p>';
 }
 
-function buildCharts() {
-  chartInstances.forEach(c => c.destroy());
-  chartInstances = [];
-  const theme = getThemeColors();
-  const baseOpts = {
-    responsive:true, maintainAspectRatio:false,
-    interaction:{mode:'index', intersect:false},
-    scales:{ x:{ grid:{color:theme.grid}, ticks:{color:theme.muted} },
-             y:{ grid:{color:theme.grid}, ticks:{color:theme.muted} } },
-    plugins:{ legend:{ labels:{color:theme.text} } }
-  };
+/* ---------- PER-LEG SECTIONS ---------- */
+const legsContainer = document.getElementById('legsContainer');
+Object.entries(LEGS).forEach(([legKey, leg], idx) => {
+  const block = document.createElement('div');
+  block.className = 'leg-block';
 
-  const putsReturns = RESULTS.map(r => (r.net_hedge_pnl_pct_port||0)*100);
+  const m = leg.metrics || {};
+  const opt = m.option_stats;
 
-  chartInstances.push(new Chart(document.getElementById('returnsChart'), {
-    type:'line',
-    data:{ labels, datasets:[
-      { label:'SPX', data: RESULTS.map(r=>(r.spx_return||0)*100), borderColor:'#6b7280', tension:0.2 },
-      { label:'Unhedged Portfolio', data: RESULTS.map(r=>r.portfolio_return_adjusted*100), borderColor:'#e2a336', tension:0.2 },
-      { label:'Puts', data: putsReturns, borderColor:'#8b5cf6', tension:0.2 },
-      { label:'Hedged Portfolio', data: RESULTS.map(r=>r.hedged_return*100), borderColor:'#3b5bfd', tension:0.2, borderWidth:2.5 },
-    ]},
-    options:{...baseOpts, plugins:{...baseOpts.plugins, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw.toFixed(2)}%`}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}} }
-  }));
-
-  chartInstances.push(new Chart(document.getElementById('cumChart'), {
-    type:'line',
-    data:{ labels, datasets:[
-      { label:'Hedged Cumulative', data: RESULTS.map(r=>r.hedged_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25 },
-      { label:'Unhedged Cumulative', data: RESULTS.map(r=>r.cumulative_return*100), borderColor:'#e2a336', tension:0.25, borderDash:[5,3] },
-      { label:'SPX Cumulative', data: (()=>{ let c=1; return RESULTS.map(r=>{ c*= (1+(r.spx_return||0)); return (c-1)*100; }); })(), borderColor:'#6b7280', tension:0.25, borderDash:[2,2] },
-    ]},
-    options:{...baseOpts, plugins:{...baseOpts.plugins, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw.toFixed(2)}%`}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}} }
-  }));
-
-  function drawdownSeries(cumArr) {
-    let peak=-Infinity; return cumArr.map(c=>{ const level=1+c; peak=Math.max(peak,level); return ((level-peak)/peak)*100; });
+  let cardsHtml = `
+    <div class="cards">
+      <div class="card ${m.annualised_return>0?'pos':'neg'}"><div class="label">Return on Capital (Ann.)</div><div class="value">${fmtPct(m.annualised_return)}</div></div>
+      <div class="card"><div class="label">Sharpe</div><div class="value">${fmtNum(m.sharpe)}</div></div>
+      <div class="card neg"><div class="label">Max Drawdown</div><div class="value">${fmtPct(m.max_drawdown)}</div></div>
+      <div class="card"><div class="label">Hit Rate</div><div class="value">${fmtPct(m.hit_rate)}</div></div>
+  `;
+  if (opt) {
+    cardsHtml += `
+      <div class="card"><div class="label">Exercise Rate</div><div class="value">${fmtPct(opt.exercise_rate)}</div><div class="sub">${opt.n_exercised}/${opt.n_periods} periods ITM</div></div>
+      <div class="card"><div class="label">Total Premium</div><div class="value">${fmtPct(opt.total_premium_pct_port)}</div></div>
+      <div class="card"><div class="label">Total Payoff</div><div class="value">${fmtPct(opt.total_payoff_pct_port)}</div></div>
+      <div class="card ${opt.net_cost_pct_port<0?'pos':'neg'}"><div class="label">Net Cost</div><div class="value">${fmtPct(opt.net_cost_pct_port)}</div></div>
+    `;
   }
-  chartInstances.push(new Chart(document.getElementById('drawdownChart'), {
-    type:'line',
-    data:{ labels, datasets:[
-      { label:'Hedged Drawdown', data: drawdownSeries(RESULTS.map(r=>r.hedged_cumulative_return)), borderColor:'#3b5bfd', backgroundColor:'rgba(59,91,253,0.12)', fill:true, tension:0.2 },
-      { label:'Unhedged Drawdown', data: drawdownSeries(RESULTS.map(r=>r.cumulative_return)), borderColor:'#e2a336', borderDash:[5,3], tension:0.2 },
+  cardsHtml += `</div>`;
+
+  const returnChartId = `legReturnChart_${idx}`;
+  const optionChartId = `legOptionChart_${idx}`;
+
+  block.innerHTML = `
+    <div class="leg-heading">${leg.label}</div>
+    <div class="leg-sub">Type: ${leg.type}</div>
+    ${cardsHtml}
+    <div class="grid2">
+      <div class="panel"><h3>Return Contribution</h3><div class="desc">This leg's $ P&amp;L per period, as a fraction of $1 total equity</div><canvas id="${returnChartId}"></canvas></div>
+      ${opt ? `<div class="panel"><h3>Premium vs Payoff</h3><div class="desc">Per-period option cash flows for this leg</div><canvas id="${optionChartId}"></canvas></div>` : '<div></div>'}
+    </div>
+  `;
+  legsContainer.appendChild(block);
+
+  const legLabels = leg.periods.map(p => p.period);
+  chartInstances.push(new Chart(document.getElementById(returnChartId), {
+    type:'bar', data:{ labels: legLabels, datasets:[
+      { label:'Return Contribution', data: leg.periods.map(p=>p.return_contribution*100),
+        backgroundColor: leg.periods.map(p=>p.return_contribution>=0?'#1fae7a':'#e5484d') },
     ]},
-    options:{...baseOpts, plugins:{...baseOpts.plugins, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw.toFixed(2)}%`}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}} }
+    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
   }));
 
-  chartInstances.push(new Chart(document.getElementById('alphaChart'), {
-    type:'bar',
-    data:{ labels, datasets:[
-      { label:'Alpha (Hedged − SPX)', data: RESULTS.map(r=>(r.hedged_return-(r.spx_return||0))*100), backgroundColor: RESULTS.map(r=> (r.hedged_return-(r.spx_return||0))>=0 ? '#1fae7a':'#e5484d') },
-    ]},
-    options:{...baseOpts, plugins:{...baseOpts.plugins, legend:{display:false}, tooltip:{callbacks:{label:c=>`Alpha: ${c.raw.toFixed(2)}%`}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}} }
-  }));
+  if (opt) {
+    const premiumField = leg.periods[0] && ('premium_paid_pct_port' in leg.periods[0]) ? 'premium_paid_pct_port' : 'premium_received_pct_port';
+    const payoffField = leg.periods[0] && ('payoff_pct_port' in leg.periods[0]) ? 'payoff_pct_port' : 'payoff_owed_pct_port';
+    const premiumSign = premiumField === 'premium_paid_pct_port' ? -1 : 1;
+    const payoffSign = payoffField === 'payoff_pct_port' ? 1 : -1;
 
-  chartInstances.push(new Chart(document.getElementById('holdingsChart'), {
-    type:'bar',
-    data:{ labels, datasets:[{ label:'Holdings', data: RESULTS.map(r=>r.n_holdings), backgroundColor:'#3b5bfd' }] },
-    options:{...baseOpts, plugins:{...baseOpts.plugins, legend:{display:false}} }
-  }));
+    chartInstances.push(new Chart(document.getElementById(optionChartId), {
+      type:'bar', data:{ labels: legLabels, datasets:[
+        { label: premiumSign<0?'Premium Paid':'Premium Received', data: leg.periods.map(p=>premiumSign*(p[premiumField]||0)*100), backgroundColor:'#e2a336' },
+        { label: payoffSign>0?'Payoff Received':'Payoff Owed', data: leg.periods.map(p=>payoffSign*(p[payoffField]||0)*100), backgroundColor: payoffSign>0?'#1fae7a':'#e5484d' },
+      ]},
+      options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{callback:v=>v+'%'}}}, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}},
+    }));
+  }
+});
 
-  chartInstances.push(new Chart(document.getElementById('premiumPayoffChart'), {
-    type:'bar',
-    data:{ labels, datasets:[
-      { label:'Premium Paid', data: RESULTS.map(r=> -Math.abs(r.premium_paid_pct_initial||0)*100), backgroundColor:'#e5484d' },
-      { label:'Payoff Received', data: RESULTS.map(r=> (r.payoff_pct_initial||0)*100), backgroundColor:'#1fae7a' },
-    ]},
-    options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}}, plugins:{...baseOpts.plugins, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw.toFixed(2)}%`}}} }
-  }));
-
-  let cp=0, cpay=0;
-  const cumPrem=[], cumPay=[], cumNet=[];
-  RESULTS.forEach(r=>{ cp += (r.premium_paid_pct_initial||0); cpay += (r.payoff_pct_initial||0); cumPrem.push(cp*100); cumPay.push(cpay*100); cumNet.push((cp-cpay)*100); });
-  chartInstances.push(new Chart(document.getElementById('cumHedgeCostChart'), {
-    type:'line',
-    data:{ labels, datasets:[
-      { label:'Cumulative Premium', data: cumPrem, borderColor:'#e5484d', tension:0.2 },
-      { label:'Cumulative Payoff', data: cumPay, borderColor:'#1fae7a', tension:0.2 },
-      { label:'Net Hedge Cost', data: cumNet, borderColor: theme.text, borderDash:[3,3], tension:0.2 },
-    ]},
-    options:{...baseOpts, plugins:{...baseOpts.plugins, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw.toFixed(2)}%`}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{...baseOpts.scales.y.ticks, callback:v=>v+'%'}}} }
-  }));
-}
-
-buildCharts();
-chartInstancesReady = true;
-
-const tbody = document.querySelector("#resultsTable tbody");
-RESULTS.forEach(r => {
-  const tr = document.createElement("tr");
+/* ---------- PERIOD TABLE ---------- */
+const tbody = document.querySelector('#resultsTable tbody');
+NET_PERIODS.forEach(r => {
+  const tr = document.createElement('tr');
   tr.innerHTML = `
     <td>${r.period}</td>
-    <td>${fmtPct(r.portfolio_return_adjusted)}</td>
-    <td>${fmtPct(r.spx_return)}</td>
-    <td>${r.exercised ? '<span class="pill yes">Yes</span>' : '<span class="pill no">No</span>'}</td>
-    <td>${fmtPct(r.premium_paid_pct_initial)}</td>
-    <td>${fmtPct(r.payoff_pct_initial)}</td>
-    <td>${fmtPct(r.net_hedge_pnl_pct_port)}</td>
-    <td>${fmtPct(r.hedged_return)}</td>
-    <td>${fmtPct(r.cumulative_return)}</td>
-    <td>${fmtPct(r.hedged_cumulative_return)}</td>
-    <td>${r.n_holdings ?? "--"}</td>
+    <td>${fmtPct(r.net_return)}</td>
+    <td>${fmtNum(r.net_gearing)}x</td>
+    <td>${fmtPct(r.financing_return)}</td>
+    <td>${fmtPct(r.net_cumulative_return)}</td>
   `;
   tbody.appendChild(tr);
 });
 
-document.querySelectorAll(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach(p=>p.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById("tab-"+btn.dataset.tab).classList.add("active");
+/* ---------- TAB SWITCHING ---------- */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
   });
 });
 </script>
