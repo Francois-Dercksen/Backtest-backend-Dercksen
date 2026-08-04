@@ -20,8 +20,18 @@ The Net Portfolio is the sum of all active legs, plus a financing adjustment:
 
 Short Call and Short Put are premium-income overlays with NO margin/collateral
 accounting: capital_weight = 0 for both, so they never appear on the gearing
-chart. Their notional exposure is tracked separately (see "notional" column on
-each leg's results_df) so a dedicated short-exposure chart can be built from it.
+chart. Their notional exposure is tracked separately as "short_exposure" on the
+Net Portfolio results_df (options-only), so a dedicated short-exposure chart can
+be built from it.
+
+Short Portfolio DOES consume capital (capital_weight = weight_pct) and already
+appears in the gearing calc, since shorting the portfolio ties up real
+capital/collateral the same way Long Portfolio does. Its notional is ALSO
+tracked separately as "short_portfolio_exposure" on the Net Portfolio
+results_df, so the exposure chart can show portfolio-driven short exposure
+alongside option-driven short exposure as two distinct series -- they are
+economically different (one is capital-backed, one is not) and should not be
+summed into a single number.
 
 Leg-level metrics (compute_leg_metrics) measure each leg's return_contribution
 directly as a fraction of $1 TOTAL equity -- NOT return_contribution divided by
@@ -753,12 +763,21 @@ SHORT_EXPOSURE_TYPES = {"short_call", "short_put"}
 
 def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available,
                                      risk_free_rate, spx_return_map=None):
+    """
+    Tracks two distinct short-exposure series, since they are economically
+    different and should not be summed:
+      - short_exposure: notional from Short Call / Short Put (capital-free,
+        no margin modelled -- excluded from the gearing calc entirely).
+      - short_portfolio_exposure: notional from Short Portfolio (capital-backed,
+        already counted in net_gearing via capital_weight).
+    """
     spx_return_map = spx_return_map or {}
     rows = []
     for rp in rebalance_periods:
         total_capital = 0.0
         total_return = 0.0
-        total_short_exposure = 0.0
+        total_short_option_exposure = 0.0
+        total_short_portfolio_exposure = 0.0
 
         for leg_key, leg_df in leg_frames.items():
             match = leg_df[leg_df["period"] == rp]
@@ -770,8 +789,10 @@ def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, fr
             leg_type = leg_types.get(leg_key)
             if leg_type in GEARING_ELIGIBLE_TYPES:
                 total_capital += float(row["capital_weight"])
-            elif leg_type in SHORT_EXPOSURE_TYPES:
-                total_short_exposure += float(row.get("notional", 0.0))
+            if leg_type in SHORT_EXPOSURE_TYPES:
+                total_short_option_exposure += float(row.get("notional", 0.0))
+            if leg_type == "short_portfolio":
+                total_short_portfolio_exposure += float(row.get("notional", 0.0))
 
         n_months = len(months_in_period(rp, frequency, available))
         period_rf = (1 + risk_free_rate) ** (n_months / 12.0) - 1 if n_months else 0.0
@@ -788,7 +809,8 @@ def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, fr
             "financing_return": financing_return,
             "leg_return_contribution": total_return,
             "net_return": net_return,
-            "short_exposure": total_short_exposure,
+            "short_exposure": total_short_option_exposure,
+            "short_portfolio_exposure": total_short_portfolio_exposure,
             "spx_return_used": spx_return_map.get(rp, None),
         })
 
