@@ -38,7 +38,7 @@
   .panel h3 { margin:0 0 2px; font-size:13px; font-weight:700; }
   .panel .desc { color:var(--muted); font-size:10.5px; margin-bottom:8px; }
   .panel.full { grid-column:1/-1; }
-  canvas { max-height:300px; }
+  canvas { max-height:320px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th, td { padding:7px 9px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
@@ -74,16 +74,26 @@
     <div class="section-title">Returns</div>
     <div class="grid2">
       <div class="panel full">
-        <h3>Annual Returns: Net Portfolio vs SPX</h3>
-        <div class="desc">Period-by-period return comparison</div>
+        <h3>Annual Returns: Net Portfolio, SPX &amp; Each Strategy</h3>
+        <div class="desc">Period-by-period return comparison across the net portfolio, benchmark, and every active leg. Click legend items to isolate a series.</div>
         <canvas id="returnsChart"></canvas>
       </div>
     </div>
 
     <div class="section-title">Performance</div>
     <div class="grid2">
-      <div class="panel"><h3>Cumulative Return</h3><div class="desc">Net portfolio vs benchmark, wealth index starting at 0</div><canvas id="cumChart"></canvas></div>
-      <div class="panel"><h3>Drawdown</h3><div class="desc">Peak-to-trough decline of the net portfolio</div><canvas id="drawdownChart"></canvas></div>
+      <div class="panel full">
+        <h3>Cumulative Return</h3>
+        <div class="desc">Net portfolio, SPX, and each strategy leg, wealth index starting at 0</div>
+        <canvas id="cumChart"></canvas>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="panel full">
+        <h3>Drawdown</h3>
+        <div class="desc">Peak-to-trough decline: net portfolio, SPX, and each strategy leg</div>
+        <canvas id="drawdownChart"></canvas>
+      </div>
     </div>
     <div class="grid2">
       <div class="panel"><h3>Annual Alpha vs SPX</h3><div class="desc">Net portfolio return minus benchmark return per period</div><canvas id="alphaChart"></canvas></div>
@@ -165,33 +175,80 @@ const baseOpts = {
   scales:{ x:{grid:{color:'rgba(20,20,43,0.06)'}}, y:{grid:{color:'rgba(20,20,43,0.06)'}} },
 };
 
-/* ---------- RETURNS (Net Portfolio vs SPX) ---------- */
-const hasSpxSeries = NET_PERIODS.some(r => r.spx_return_used !== undefined && r.spx_return_used !== null);
-chartInstances.push(new Chart(document.getElementById('returnsChart'), {
-  type:'line', data:{ labels, datasets:[
-    { label:'SPX', data: NET_PERIODS.map(r=>r.spx_return_used!=null ? r.spx_return_used*100 : null), borderColor:'#6b7280', tension:0.2 },
-    { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_return*100), borderColor:'#3b5bfd', tension:0.2, borderWidth:2.5 },
-  ]},
-  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
-}));
+/* Distinct colors per leg, cycled if there are more legs than colors */
+const LEG_COLOR_PALETTE = ['#e2a336', '#8b5cf6', '#0ea5a3', '#d946a0', '#f97316', '#06b6d4', '#84cc16'];
+function legColor(idx) { return LEG_COLOR_PALETTE[idx % LEG_COLOR_PALETTE.length]; }
 
-/* ---------- CUMULATIVE RETURN ---------- */
-chartInstances.push(new Chart(document.getElementById('cumChart'), {
-  type:'line', data:{ labels, datasets:[
-    { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25 },
-  ]},
-  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
-}));
-
-/* ---------- DRAWDOWN ---------- */
-function drawdownSeries(cumArr) {
-  let peak = -Infinity;
-  return cumArr.map(c => { const level=1+c; peak=Math.max(peak,level); return (level-peak)/peak*100; });
+/* Build a series of period returns for a leg, aligned to NET_PERIODS by period label */
+function alignLegReturns(legPeriods) {
+  const map = {};
+  legPeriods.forEach(p => { map[p.period] = p.return_contribution; });
+  return labels.map(l => (l in map) ? map[l] : null);
 }
+
+/* Cumulative return series from a return array (nulls treated as 0 for compounding) */
+function toCumulative(returnArr) {
+  let cum = 1;
+  return returnArr.map(r => { cum *= (1 + (r || 0)); return (cum - 1) * 100; });
+}
+
+/* Drawdown series (%) from a cumulative-return array expressed in % (as produced by toCumulative) */
+function toDrawdown(cumPctArr) {
+  let peakLevel = -Infinity;
+  return cumPctArr.map(cPct => {
+    const level = 1 + cPct / 100;
+    peakLevel = Math.max(peakLevel, level);
+    return (level - peakLevel) / peakLevel * 100;
+  });
+}
+
+const legEntries = Object.entries(LEGS);
+const spxReturns = NET_PERIODS.map(r => r.spx_return_used);
+const hasSpxSeries = spxReturns.some(v => v !== undefined && v !== null);
+const netReturns = NET_PERIODS.map(r => r.net_return);
+
+/* ---------- RETURNS (Net Portfolio, SPX, and each leg) ---------- */
+const returnsDatasets = [];
+if (hasSpxSeries) {
+  returnsDatasets.push({ label:'SPX', data: spxReturns.map(v => v!=null ? v*100 : null), borderColor:'#6b7280', borderDash:[4,3], tension:0.2 });
+}
+returnsDatasets.push({ label:'Net Portfolio', data: netReturns.map(v=>v*100), borderColor:'#3b5bfd', tension:0.2, borderWidth:2.5 });
+legEntries.forEach(([legKey, leg], idx) => {
+  const aligned = alignLegReturns(leg.periods);
+  returnsDatasets.push({ label: leg.label, data: aligned.map(v => v!=null ? v*100 : null), borderColor: legColor(idx), tension:0.2, borderWidth:1.5 });
+});
+chartInstances.push(new Chart(document.getElementById('returnsChart'), {
+  type:'line', data:{ labels, datasets: returnsDatasets },
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+/* ---------- CUMULATIVE RETURN (Net Portfolio, SPX, and each leg) ---------- */
+const cumDatasets = [];
+if (hasSpxSeries) {
+  cumDatasets.push({ label:'SPX', data: toCumulative(spxReturns), borderColor:'#6b7280', borderDash:[4,3], tension:0.25 });
+}
+cumDatasets.push({ label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25, borderWidth:2.5 });
+legEntries.forEach(([legKey, leg], idx) => {
+  const aligned = alignLegReturns(leg.periods);
+  cumDatasets.push({ label: leg.label, data: toCumulative(aligned), borderColor: legColor(idx), tension:0.25, borderWidth:1.5 });
+});
+chartInstances.push(new Chart(document.getElementById('cumChart'), {
+  type:'line', data:{ labels, datasets: cumDatasets },
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+/* ---------- DRAWDOWN (Net Portfolio, SPX, and each leg) ---------- */
+const ddDatasets = [];
+if (hasSpxSeries) {
+  ddDatasets.push({ label:'SPX', data: toDrawdown(toCumulative(spxReturns)), borderColor:'#6b7280', borderDash:[4,3], tension:0.2 });
+}
+ddDatasets.push({ label:'Net Portfolio', data: toDrawdown(NET_PERIODS.map(r=>r.net_cumulative_return*100)), borderColor:'#3b5bfd', backgroundColor:'rgba(59,91,253,0.08)', fill:true, tension:0.2, borderWidth:2.5 });
+legEntries.forEach(([legKey, leg], idx) => {
+  const aligned = alignLegReturns(leg.periods);
+  ddDatasets.push({ label: leg.label, data: toDrawdown(toCumulative(aligned)), borderColor: legColor(idx), tension:0.2, borderWidth:1.5 });
+});
 chartInstances.push(new Chart(document.getElementById('drawdownChart'), {
-  type:'line', data:{ labels, datasets:[
-    { label:'Drawdown', data: drawdownSeries(NET_PERIODS.map(r=>r.net_cumulative_return)), borderColor:'#e5484d', backgroundColor:'rgba(229,72,77,0.12)', fill:true, tension:0.2 },
-  ]},
+  type:'line', data:{ labels, datasets: ddDatasets },
   options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
 }));
 
