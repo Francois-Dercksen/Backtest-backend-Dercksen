@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DERCKSEN Backtest Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#f5f6fa; --card:#ffffff; --border:#e3e6ec; --text:#1c2130; --muted:#6b7280;
+    --accent:#3b5bfd; --green:#1fae7a; --red:#e5484d; --amber:#e2a336; --purple:#8b5cf6;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+  header { padding:24px 32px 6px; }
+  header h1 { margin:0 0 4px; font-size:21px; font-weight:700; }
+  header p { margin:0; color:var(--muted); font-size:12.5px; }
+  .wrap { padding:0 32px 40px; }
+  .tabs { display:flex; gap:4px; margin:16px 0 6px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .tab-btn { background:none; border:none; padding:9px 14px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; }
+  .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0 24px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .card .label { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:5px; }
+  .card .value { font-size:20px; font-weight:700; }
+  .card .sub { font-size:10.5px; color:var(--muted); margin-top:3px; }
+  .card.pos .value { color:var(--green); }
+  .card.neg .value { color:var(--red); }
+  .section-title { font-size:14px; font-weight:700; margin:24px 0 10px; border-left:3px solid var(--accent); padding-left:9px; }
+  .leg-heading { font-size:16px; font-weight:700; margin:0 0 4px; }
+  .leg-sub { font-size:11.5px; color:var(--muted); margin:0 0 10px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:1000px) { .grid2 { grid-template-columns:1fr; } }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .panel h3 { margin:0 0 2px; font-size:13px; font-weight:700; }
+  .panel .desc { color:var(--muted); font-size:10.5px; margin-bottom:8px; }
+  .panel.full { grid-column:1/-1; }
+  canvas { max-height:300px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { padding:7px 9px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+  .tablewrap { max-height:520px; overflow:auto; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:10.5px; font-weight:600; }
+  .pill.yes { background:rgba(229,72,77,.12); color:var(--red); }
+  .pill.no { background:rgba(31,174,122,.12); color:var(--green); }
+  .leg-block { margin-bottom:36px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>DERCKSEN Backtest Report</h1>
+  <p>Frequency: <span id="freqLabel">__FREQUENCY__</span> &middot; Risk basis: <span id="riskLabel">__RISK_FREQUENCY__</span> &middot; Benchmark: <span id="benchLabel">__BENCHMARK_TICKER__</span></p>
+</header>
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="tab-overview">Overview</button>
+    <button class="tab-btn" data-tab="tab-netportfolio">Net Portfolio</button>
+    <button class="tab-btn" data-tab="tab-legs">Strategy Legs</button>
+    <button class="tab-btn" data-tab="tab-table">Period Table</button>
+  </div>
+
+  <div class="tab-panel active" id="tab-overview">
+    <div class="section-title">Net Portfolio Summary</div>
+    <div class="cards" id="headlineCards"></div>
+    <div class="section-title">Benchmark Comparison</div>
+    <div class="cards" id="benchmarkCards"></div>
+  </div>
+
+  <div class="tab-panel" id="tab-netportfolio">
+    <div class="section-title">Performance</div>
+    <div class="grid2">
+      <div class="panel"><h3>Cumulative Return</h3><div class="desc">Net portfolio vs benchmark, wealth index starting at 0</div><canvas id="cumChart"></canvas></div>
+      <div class="panel"><h3>Drawdown</h3><div class="desc">Peak-to-trough decline of the net portfolio</div><canvas id="drawdownChart"></canvas></div>
+    </div>
+    <div class="section-title">Capital &amp; Financing</div>
+    <div class="grid2">
+      <div class="panel"><h3>Net Gearing</h3><div class="desc">Total capital allocated across gearing-eligible legs (1.0 = fully invested; above 1.0 = borrowing; below 1.0 = idle cash)</div><canvas id="gearingChart"></canvas></div>
+      <div class="panel" id="shortExposurePanel"><h3>Short Exposure</h3><div class="desc">Notional exposure from Short Call / Short Put legs (no margin modelled)</div><canvas id="shortExposureChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-legs">
+    <div id="legsContainer"></div>
+  </div>
+
+  <div class="tab-panel" id="tab-table">
+    <div class="panel">
+      <div class="tablewrap">
+        <table id="resultsTable">
+          <thead><tr>
+            <th>Period</th><th>Net Return</th><th>Gearing</th><th>Financing</th><th>Cumulative</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const NET_PERIODS = __NET_PERIODS_JSON__;
+const NET_METRICS = __NET_METRICS_JSON__;
+const LEGS = __LEGS_JSON__;
+
+function fmtPct(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? '--' : (v*100).toFixed(d)+'%'; }
+function fmtNum(v, d=2) { return (v===null||v===undefined||isNaN(v)) ? '--' : Number(v).toFixed(d); }
+
+function card(container, label, value, sub, cls) {
+  const div = document.createElement('div');
+  div.className = 'card ' + (cls || '');
+  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub||''}</div>`;
+  container.appendChild(div);
+}
+
+/* ---------- HEADLINE / BENCHMARK CARDS ---------- */
+const headlineCards = document.getElementById('headlineCards');
+card(headlineCards, 'CAGR', fmtPct(NET_METRICS.annualised_return), 'Net portfolio annualised return', NET_METRICS.annualised_return>0?'pos':'neg');
+card(headlineCards, 'Max Drawdown', fmtPct(NET_METRICS.max_drawdown), 'Peak-to-trough decline', 'neg');
+card(headlineCards, 'Sharpe Ratio', fmtNum(NET_METRICS.sharpe), 'Return / volatility');
+card(headlineCards, 'Sortino Ratio', fmtNum(NET_METRICS.sortino), 'Return / downside deviation');
+card(headlineCards, 'Calmar Ratio', fmtNum(NET_METRICS.calmar), 'CAGR / |Max Drawdown|');
+card(headlineCards, 'VaR (95%)', fmtPct(NET_METRICS.var_95), '5th percentile period return', 'neg');
+card(headlineCards, 'Hit Rate', fmtPct(NET_METRICS.hit_rate), '% of periods with positive return');
+card(headlineCards, 'Avg Turnover', fmtPct(NET_METRICS.avg_turnover), 'Long portfolio holdings turnover');
+card(headlineCards, 'Backtest Length', (NET_METRICS.n_periods ?? '--') + ' periods', '');
+
+const bm = NET_METRICS.benchmark;
+const benchmarkCards = document.getElementById('benchmarkCards');
+if (bm) {
+  card(benchmarkCards, 'Alpha', fmtPct(bm.alpha), 'Excess annualised return vs benchmark', bm.alpha>0?'pos':'neg');
+  card(benchmarkCards, 'Beta', fmtNum(bm.beta, 3), 'Sensitivity to benchmark');
+  card(benchmarkCards, 'Tracking Error', fmtPct(bm.tracking_error), 'Annualised stdev of active return');
+  card(benchmarkCards, 'Information Ratio', fmtNum(bm.info_ratio, 3), 'Alpha / tracking error');
+  card(benchmarkCards, 'Up Capture', fmtPct(bm.up_capture), 'Capture of benchmark up-periods');
+  card(benchmarkCards, 'Down Capture', fmtPct(bm.down_capture), 'Capture of benchmark down-periods', bm.down_capture<1?'pos':'neg');
+  card(benchmarkCards, 'Outperformance Rate', fmtPct(bm.outperf_rate), '% of periods beating benchmark');
+} else {
+  benchmarkCards.innerHTML = '<p style="color:var(--muted);font-size:12px;">No benchmark overlap available for this backtest window.</p>';
+}
+
+/* ---------- CHARTS ---------- */
+const labels = NET_PERIODS.map(r => r.period);
+let chartInstances = [];
+const baseOpts = {
+  responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+  scales:{ x:{grid:{color:'rgba(20,20,43,0.06)'}}, y:{grid:{color:'rgba(20,20,43,0.06)'}} },
+};
+
+chartInstances.push(new Chart(document.getElementById('cumChart'), {
+  type:'line', data:{ labels, datasets:[
+    { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25 },
+  ]},
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+function drawdownSeries(cumArr) {
+  let peak = -Infinity;
+  return cumArr.map(c => { const level=1+c; peak=Math.max(peak,level); return (level-peak)/peak*100; });
+}
+chartInstances.push(new Chart(document.getElementById('drawdownChart'), {
+  type:'line', data:{ labels, datasets:[
+    { label:'Drawdown', data: drawdownSeries(NET_PERIODS.map(r=>r.net_cumulative_return)), borderColor:'#e5484d', backgroundColor:'rgba(229,72,77,0.12)', fill:true, tension:0.2 },
+  ]},
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+chartInstances.push(new Chart(document.getElementById('gearingChart'), {
+  type:'bar', data:{ labels, datasets:[
+    { label:'Net Gearing', data: NET_PERIODS.map(r=>r.net_gearing), backgroundColor: NET_PERIODS.map(r=>r.net_gearing>1?'#e5484d':(r.net_gearing<1?'#e2a336':'#1fae7a')) },
+  ]},
+  options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Gearing: '+c.raw.toFixed(2)+'x'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'x'}}}},
+}));
+
+const hasShortExposure = NET_PERIODS.some(r => (r.short_exposure||0) !== 0);
+if (hasShortExposure) {
+  chartInstances.push(new Chart(document.getElementById('shortExposureChart'), {
+    type:'bar', data:{ labels, datasets:[
+      { label:'Short Exposure', data: NET_PERIODS.map(r=>r.short_exposure*100), backgroundColor:'#8b5cf6' },
+    ]},
+    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Exposure: '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+  }));
+} else {
+  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p style="color:var(--muted);font-size:12px;">No Short Call / Short Put legs active in this backtest.</p>';
+}
+
+/* ---------- PER-LEG SECTIONS ---------- */
+const legsContainer = document.getElementById('legsContainer');
+Object.entries(LEGS).forEach(([legKey, leg], idx) => {
+  const block = document.createElement('div');
+  block.className = 'leg-block';
+
+  const m = leg.metrics || {};
+  const opt = m.option_stats;
+
+  let cardsHtml = `
+    <div class="cards">
+      <div class="card ${m.annualised_return>0?'pos':'neg'}"><div class="label">Return on Capital (Ann.)</div><div class="value">${fmtPct(m.annualised_return)}</div></div>
+      <div class="card"><div class="label">Sharpe</div><div class="value">${fmtNum(m.sharpe)}</div></div>
+      <div class="card neg"><div class="label">Max Drawdown</div><div class="value">${fmtPct(m.max_drawdown)}</div></div>
+      <div class="card"><div class="label">Hit Rate</div><div class="value">${fmtPct(m.hit_rate)}</div></div>
+  `;
+  if (opt) {
+    cardsHtml += `
+      <div class="card"><div class="label">Exercise Rate</div><div class="value">${fmtPct(opt.exercise_rate)}</div><div class="sub">${opt.n_exercised}/${opt.n_periods} periods ITM</div></div>
+      <div class="card"><div class="label">Total Premium</div><div class="value">${fmtPct(opt.total_premium_pct_port)}</div></div>
+      <div class="card"><div class="label">Total Payoff</div><div class="value">${fmtPct(opt.total_payoff_pct_port)}</div></div>
+      <div class="card ${opt.net_cost_pct_port<0?'pos':'neg'}"><div class="label">Net Cost</div><div class="value">${fmtPct(opt.net_cost_pct_port)}</div></div>
+    `;
+  }
+  cardsHtml += `</div>`;
+
+  const returnChartId = `legReturnChart_${idx}`;
+  const optionChartId = `legOptionChart_${idx}`;
+
+  block.innerHTML = `
+    <div class="leg-heading">${leg.label}</div>
+    <div class="leg-sub">Type: ${leg.type}</div>
+    ${cardsHtml}
+    <div class="grid2">
+      <div class="panel"><h3>Return Contribution</h3><div class="desc">This leg's $ P&amp;L per period, as a fraction of $1 total equity</div><canvas id="${returnChartId}"></canvas></div>
+      ${opt ? `<div class="panel"><h3>Premium vs Payoff</h3><div class="desc">Per-period option cash flows for this leg</div><canvas id="${optionChartId}"></canvas></div>` : '<div></div>'}
+    </div>
+  `;
+  legsContainer.appendChild(block);
+
+  const legLabels = leg.periods.map(p => p.period);
+  chartInstances.push(new Chart(document.getElementById(returnChartId), {
+    type:'bar', data:{ labels: legLabels, datasets:[
+      { label:'Return Contribution', data: leg.periods.map(p=>p.return_contribution*100),
+        backgroundColor: leg.periods.map(p=>p.return_contribution>=0?'#1fae7a':'#e5484d') },
+    ]},
+    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+  }));
+
+  if (opt) {
+    const premiumField = leg.periods[0] && ('premium_paid_pct_port' in leg.periods[0]) ? 'premium_paid_pct_port' : 'premium_received_pct_port';
+    const payoffField = leg.periods[0] && ('payoff_pct_port' in leg.periods[0]) ? 'payoff_pct_port' : 'payoff_owed_pct_port';
+    const premiumSign = premiumField === 'premium_paid_pct_port' ? -1 : 1;
+    const payoffSign = payoffField === 'payoff_pct_port' ? 1 : -1;
+
+    chartInstances.push(new Chart(document.getElementById(optionChartId), {
+      type:'bar', data:{ labels: legLabels, datasets:[
+        { label: premiumSign<0?'Premium Paid':'Premium Received', data: leg.periods.map(p=>premiumSign*(p[premiumField]||0)*100), backgroundColor:'#e2a336' },
+        { label: payoffSign>0?'Payoff Received':'Payoff Owed', data: leg.periods.map(p=>payoffSign*(p[payoffField]||0)*100), backgroundColor: payoffSign>0?'#1fae7a':'#e5484d' },
+      ]},
+      options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{callback:v=>v+'%'}}}, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}},
+    }));
+  }
+});
+
+/* ---------- PERIOD TABLE ---------- */
+const tbody = document.querySelector('#resultsTable tbody');
+NET_PERIODS.forEach(r => {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${r.period}</td>
+    <td>${fmtPct(r.net_return)}</td>
+    <td>${fmtNum(r.net_gearing)}x</td>
+    <td>${fmtPct(r.financing_return)}</td>
+    <td>${fmtPct(r.net_cumulative_return)}</td>
+  `;
+  tbody.appendChild(tr);
+});
+
+/* ---------- TAB SWITCHING ---------- */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
