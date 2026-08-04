@@ -103,11 +103,11 @@
     <div class="section-title">Capital &amp; Financing</div>
     <div class="grid2">
       <div class="panel"><h3>Net Gearing</h3><div class="desc">Total capital allocated across gearing-eligible legs (1.0 = fully invested; above 1.0 = borrowing; below 1.0 = idle cash)</div><canvas id="gearingChart"></canvas></div>
-      <div class="panel" id="shortExposurePanel"><h3>Short Exposure</h3><div class="desc">Notional exposure from Short Call / Short Put legs (no margin modelled)</div><canvas id="shortExposureChart"></canvas></div>
+      <div class="panel" id="shortExposurePanel"><h3>Short Exposure</h3><div class="desc">Notional exposure from Short Portfolio (capital-backed) and Short Call / Short Put (no margin modelled), shown separately</div><canvas id="shortExposureChart"></canvas></div>
     </div>
   </div>
 
-  <!-- STRATEGY LEGS: per-leg cards + return contribution + (for options) hedge mechanics charts -->
+  <!-- STRATEGY LEGS: per-leg cards + return contribution + (for options) rolling net option cost -->
   <div class="tab-panel" id="tab-legs">
     <div id="legsContainer"></div>
   </div>
@@ -286,17 +286,23 @@ chartInstances.push(new Chart(document.getElementById('gearingChart'), {
   options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Gearing: '+c.raw.toFixed(2)+'x'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'x'}}}},
 }));
 
-/* ---------- SHORT EXPOSURE ---------- */
-const hasShortExposure = NET_PERIODS.some(r => (r.short_exposure||0) !== 0);
-if (hasShortExposure) {
+/* ---------- SHORT EXPOSURE (Short Portfolio + Short Options, shown separately) ---------- */
+const hasShortOptionExposure = NET_PERIODS.some(r => (r.short_exposure||0) !== 0);
+const hasShortPortfolioExposure = NET_PERIODS.some(r => (r.short_portfolio_exposure||0) !== 0);
+if (hasShortOptionExposure || hasShortPortfolioExposure) {
+  const exposureDatasets = [];
+  if (hasShortPortfolioExposure) {
+    exposureDatasets.push({ label:'Short Portfolio (capital-backed)', data: NET_PERIODS.map(r=>(r.short_portfolio_exposure||0)*100), backgroundColor:'#3b5bfd' });
+  }
+  if (hasShortOptionExposure) {
+    exposureDatasets.push({ label:'Short Call / Short Put (no margin modelled)', data: NET_PERIODS.map(r=>(r.short_exposure||0)*100), backgroundColor:'#8b5cf6' });
+  }
   chartInstances.push(new Chart(document.getElementById('shortExposureChart'), {
-    type:'bar', data:{ labels, datasets:[
-      { label:'Short Exposure', data: NET_PERIODS.map(r=>r.short_exposure*100), backgroundColor:'#8b5cf6' },
-    ]},
-    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Exposure: '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+    type:'bar', data:{ labels, datasets: exposureDatasets },
+    options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{callback:v=>v+'%'}}}, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}},
   }));
 } else {
-  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p class="no-data">No Short Call / Short Put legs active in this backtest.</p>';
+  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p class="no-data">No Short Portfolio, Short Call, or Short Put legs active in this backtest.</p>';
 }
 
 /* ---------- PER-LEG SECTIONS (Strategy Legs tab) ---------- */
@@ -326,7 +332,6 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
   cardsHtml += `</div>`;
 
   const returnChartId = `legReturnChart_${idx}`;
-  const premiumPayoffChartId = `legPremiumPayoffChart_${idx}`;
   const cumHedgeCostChartId = `legCumHedgeCostChart_${idx}`;
 
   block.innerHTML = `
@@ -335,12 +340,8 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
     ${cardsHtml}
     <div class="grid2">
       <div class="panel"><h3>Return Contribution</h3><div class="desc">This leg's $ P&amp;L per period, as a fraction of $1 total equity</div><canvas id="${returnChartId}"></canvas></div>
-      ${opt ? `<div class="panel"><h3>Premium vs Payoff</h3><div class="desc">Per-period option cash flows for this leg</div><canvas id="${premiumPayoffChartId}"></canvas></div>` : '<div></div>'}
+      ${opt ? `<div class="panel"><h3>Rolling Net Option Cost</h3><div class="desc">Cumulative premium, payoff, and net cost for this leg over the backtest</div><canvas id="${cumHedgeCostChartId}"></canvas></div>` : '<div></div>'}
     </div>
-    ${opt ? `
-    <div class="grid2">
-      <div class="panel full"><h3>Rolling Net Option Cost</h3><div class="desc">Cumulative premium, payoff, and net cost for this leg over the backtest</div><canvas id="${cumHedgeCostChartId}"></canvas></div>
-    </div>` : ''}
   `;
   legsContainer.appendChild(block);
 
@@ -358,16 +359,8 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
     const payoffField = leg.periods[0] && ('payoff_pct_port' in leg.periods[0]) ? 'payoff_pct_port' : 'payoff_owed_pct_port';
     const isLongOption = premiumField === 'premium_paid_pct_port';
 
-    /* Premium vs Payoff (mirrors the old "Hedge Mechanics" premium/payoff chart) */
-    chartInstances.push(new Chart(document.getElementById(premiumPayoffChartId), {
-      type:'bar', data:{ labels: legLabels, datasets:[
-        { label: isLongOption?'Premium Paid':'Premium Received', data: leg.periods.map(p=>(isLongOption?-1:1)*(p[premiumField]||0)*100), backgroundColor:'#e2a336' },
-        { label: isLongOption?'Payoff Received':'Payoff Owed', data: leg.periods.map(p=>(isLongOption?1:-1)*(p[payoffField]||0)*100), backgroundColor: isLongOption?'#1fae7a':'#e5484d' },
-      ]},
-      options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{callback:v=>v+'%'}}}, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}},
-    }));
-
-    /* Rolling net cost (mirrors the old "Rolling Net Hedge Cost" chart) */
+    /* Rolling net cost (mirrors the old "Rolling Net Hedge Cost" chart; now the only
+       option-mechanics chart per leg, replacing the removed Premium vs Payoff chart) */
     let cp = 0, cpay = 0;
     const cumPrem = [], cumPay = [], cumNet = [];
     leg.periods.forEach(p => {
