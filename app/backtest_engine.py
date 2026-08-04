@@ -1,12 +1,30 @@
 """
 backtest_engine.py
 
-Core backtesting logic, ported from H1_backtest_hedge.py.
-Supports long-only (no hedge) and long-only + long put overlay modes.
-Notional matching for the put overlay supports three modes:
-  - "real-beta": single beta computed over the full backtest window
-  - "dynamic-beta": beta recalculated each period using only prior periods
-  - "custom": fixed user-supplied beta value
+Modular, leg-based backtesting engine.
+
+Architecture
+------------
+Every selected strategy (Long Portfolio, Long Put, Long Call, ...) is a "leg".
+Each leg produces, per rebalance period:
+  - capital_weight: fraction of $1 total equity this leg consumes that period
+  - return_contribution: $ P&L this leg adds that period, as a fraction of $1 equity
+
+The Net Portfolio is the sum of all active legs, plus a financing adjustment:
+  total_capital = sum(capital_weight across legs)
+  excess = total_capital - 1.0
+  period_rf = (1 + risk_free_rate) ** (months_in_period / 12) - 1
+  financing_return = -excess * period_rf      # expense if geared, income if holding cash
+  net_return = sum(return_contribution across legs) + financing_return
+  net_gearing = total_capital                 # 1.0 = fully invested, >1.0 = geared
+
+Short Call and Short Put are premium-income overlays with NO margin/collateral
+accounting: capital_weight = 0 for both, so they never appear on the gearing
+chart. Their notional exposure is tracked separately (see "notional" column on
+each leg's results_df) so a dedicated short-exposure chart can be built from it.
+
+This lets any combination of legs be run together (or standalone) without the
+engine needing to special-case combinations.
 """
 
 import os
@@ -23,10 +41,15 @@ BENCHMARK_TICKER = "SPX"
 FREQUENCY = "annual"
 RISK_FREQUENCY = "monthly"
 ROLLING_WINDOW = 3
+RISK_FREE_RATE = 0.045  # effective annual rate; static input for now
 
-TRANSACTION_COST_BPS = 10.0  # charged once at purchase; charged again ONLY if exercised (ITM at expiry)
-COUNTERPARTY_HAIRCUT = 0.0   # % of payoff lost to settlement friction (0 = none)
+TRANSACTION_COST_BPS = 10.0
+COUNTERPARTY_HAIRCUT = 0.0
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Period / date helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_period_col(col: str):
     col = col.strip()
@@ -107,6 +130,10 @@ def normalise_ticker(t: str) -> str:
     return t.strip().split(" ")[0].upper()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Risk resampling / metrics (unchanged math, generic over any return column)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def compound_series_to_frequency(monthly_series, target_frequency):
     if monthly_series is None or len(monthly_series) == 0:
         return pd.Series(dtype=float)
@@ -164,7 +191,10 @@ def compute_metrics(results_df, return_col, frequency, risk_frequency, rolling_w
                      monthly_returns_map=None):
     period_returns = results_df[return_col].dropna()
     n_periods = len(period_returns)
-    cum_series = (1 + results_df[return_col]).cumprod()
+    if n_periods == 0:
+        return {"n_periods": 0}
+
+    cum_series = (1 + results_df[return_col].fillna(0)).cumprod()
     total_cumulative = cum_series.iloc[-1] - 1
     annualised_return = cagr(total_cumulative, n_periods, ppy)
 
@@ -295,6 +325,10 @@ def compute_benchmark_stats(results_df, return_col, index_df, benchmark_ticker, 
     }, bench_series
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Data loading
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_normalised_ticker_map(returns_df_index):
     norm_to_orig = {}
     for orig in returns_df_index:
@@ -349,7 +383,106 @@ def load_portfolio_csv(path):
     return portfolio
 
 
-# ---------- LONG PUT OVERLAY ----------
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared per-period market context (built once, used by every leg)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_market_context(rebalance_periods, frequency, available, returns_df, norm_to_orig,
+                          index_df, benchmark_ticker, portfolio_by_period):
+    """
+    Computes, for every rebalance period:
+      - raw_portfolio_return: weighted-average return of the long portfolio's
+        holdings, using each holding's OWN relative weight (normalised to sum
+        to the weight actually matched to data). This is "return per dollar
+        allocated to the long-portfolio leg", independent of how much capital
+        is allocated to that leg overall.
+      - spx_return: benchmark return over the same period (used by options legs).
+      - monthly_port_rets: monthly-frequency version of the portfolio return,
+        used for risk-frequency resampling in metrics.
+      - tickers_by_period: holdings set per period, used for turnover.
+    """
+    raw_return_map, spx_return_map, monthly_port_rets, tickers_by_period = {}, {}, {}, {}
+    holdings_count = {}
+
+    for rebal_period in rebalance_periods:
+        weight_period = period_start(rebal_period, frequency)
+        sub_months = months_in_period(rebal_period, frequency, available)
+        if not sub_months:
+            continue
+
+        if weight_period in portfolio_by_period:
+            port_group = portfolio_by_period[weight_period]
+            tickers_by_period[rebal_period] = set(port_group["ticker"].tolist())
+
+            weighted_returns, total_weight_used = [], 0.0
+            monthly_weighted = {m: [] for m in sub_months}
+            monthly_weights = {m: 0.0 for m in sub_months}
+
+            for _, prow in port_group.iterrows():
+                ticker_norm = prow["ticker"]
+                weight = prow["weight"]
+                orig_ticker = norm_to_orig.get(ticker_norm)
+                if orig_ticker is None:
+                    continue
+
+                monthly_rets, skip = [], False
+                for m in sub_months:
+                    if m not in returns_df.columns:
+                        skip = True
+                        break
+                    r = returns_df.loc[orig_ticker, m]
+                    if isinstance(r, pd.Series):
+                        r = r.iloc[0]
+                    if pd.isna(r):
+                        skip = True
+                        break
+                    monthly_rets.append(r)
+                if skip or not monthly_rets:
+                    continue
+
+                compounded = np.prod([1 + r for r in monthly_rets]) - 1
+                weighted_returns.append(compounded * weight)
+                total_weight_used += weight
+                for m, r in zip(sub_months, monthly_rets):
+                    monthly_weighted[m].append(r * weight)
+                    monthly_weights[m] += weight
+
+            if weighted_returns and total_weight_used > 0:
+                raw_return_map[rebal_period] = sum(weighted_returns) / total_weight_used
+                holdings_count[rebal_period] = len(weighted_returns)
+                for m in sub_months:
+                    if monthly_weights[m] > 0:
+                        monthly_port_rets[m] = sum(monthly_weighted[m]) / monthly_weights[m]
+
+        if benchmark_ticker in index_df.index:
+            spx_rets, ok = [], True
+            for m in sub_months:
+                if m not in index_df.columns:
+                    ok = False
+                    break
+                r = index_df.loc[benchmark_ticker, m]
+                if isinstance(r, pd.Series):
+                    r = r.iloc[0]
+                if pd.isna(r):
+                    ok = False
+                    break
+                spx_rets.append(r)
+            if ok and spx_rets:
+                spx_return_map[rebal_period] = np.prod([1 + r for r in spx_rets]) - 1
+
+    return {
+        "raw_portfolio_return": raw_return_map,
+        "spx_return": spx_return_map,
+        "monthly_port_rets": monthly_port_rets,
+        "tickers_by_period": tickers_by_period,
+        "holdings_count": holdings_count,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Beta helpers (used by Long Put notional matching)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def compute_full_period_beta(port_returns, spx_returns):
     common = port_returns.index.intersection(spx_returns.index)
     if len(common) < 2:
@@ -361,10 +494,6 @@ def compute_full_period_beta(port_returns, spx_returns):
 
 
 def compute_dynamic_beta_series(port_returns, spx_returns):
-    """
-    For each period, beta uses only periods strictly before it (expanding window).
-    Returns a dict {period: beta_or_nan}.
-    """
     common = sorted(port_returns.index.intersection(spx_returns.index))
     betas = {}
     for i, period in enumerate(common):
@@ -379,96 +508,304 @@ def compute_dynamic_beta_series(port_returns, spx_returns):
     return betas
 
 
-def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, custom_beta=None,
-                            txn_cost_bps=TRANSACTION_COST_BPS, counterparty_haircut=COUNTERPARTY_HAIRCUT):
-    """
-    Adds protective put P&L on top of the long-only results_df.
-    otm_pct: e.g. 0.10 means strike = 90% of spot (10% OTM).
-    premium_pct: annual premium as % of notional, e.g. 0.0419.
-    notional_method: "real-beta" | "dynamic-beta" | "custom".
-    txn_cost_bps: one-way transaction cost in bps, charged at purchase and again if exercised.
-    counterparty_haircut: fraction of payoff lost to settlement friction (0 = none).
-    """
-    results_df = results_df.copy()
+# ─────────────────────────────────────────────────────────────────────────────
+# LEG BUILDERS
+#
+# Every leg builder returns a DataFrame indexed by "period" with at least:
+#   capital_weight       -- fraction of $1 equity consumed this period
+#   return_contribution  -- $ P&L added this period, as a fraction of $1 equity
+# plus leg-specific diagnostic columns for reporting (e.g. "notional" for
+# options legs, used to build exposure charts independent of the capital ledger).
+# ─────────────────────────────────────────────────────────────────────────────
 
-    port_series = results_df.set_index("period")["portfolio_return_adjusted"]
-    spx_series = results_df.set_index("period")["spx_return"].dropna()
+def build_long_portfolio_leg(rebalance_periods, market, weight_pct=1.0):
+    rows = []
+    for rp in rebalance_periods:
+        raw_ret = market["raw_portfolio_return"].get(rp, np.nan)
+        n_holdings = market["holdings_count"].get(rp, 0)
+        rows.append({
+            "period": rp,
+            "portfolio_return_raw": raw_ret,
+            "notional": weight_pct,
+            "capital_weight": weight_pct,
+            "return_contribution": raw_ret * weight_pct if pd.notna(raw_ret) else 0.0,
+            "n_holdings": n_holdings,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_short_portfolio_leg(rebalance_periods, market, weight_pct=1.0):
+    rows = []
+    for rp in rebalance_periods:
+        raw_ret = market["raw_portfolio_return"].get(rp, np.nan)
+        n_holdings = market["holdings_count"].get(rp, 0)
+        rows.append({
+            "period": rp,
+            "portfolio_return_raw": raw_ret,
+            "notional": weight_pct,
+            "capital_weight": weight_pct,
+            "return_contribution": -raw_ret * weight_pct if pd.notna(raw_ret) else 0.0,
+            "n_holdings": n_holdings,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_long_put_leg(rebalance_periods, market, otm_pct, premium_pct, notional_method,
+                        custom_beta=None, txn_cost_bps=TRANSACTION_COST_BPS,
+                        counterparty_haircut=COUNTERPARTY_HAIRCUT):
+    port_series = pd.Series(market["raw_portfolio_return"])
+    spx_series = pd.Series(market["spx_return"]).dropna()
 
     if notional_method == "real-beta":
         beta_val = compute_full_period_beta(port_series, spx_series)
-        beta_map = {p: beta_val for p in results_df["period"]}
+        beta_map = {p: beta_val for p in rebalance_periods}
     elif notional_method == "dynamic-beta":
         beta_map = compute_dynamic_beta_series(port_series, spx_series)
     elif notional_method == "custom":
         beta_val = custom_beta if custom_beta is not None else 1.0
-        beta_map = {p: beta_val for p in results_df["period"]}
+        beta_map = {p: beta_val for p in rebalance_periods}
     else:
         raise ValueError(f"Unknown notional_method {notional_method!r}")
 
     strike_pct = 1 - otm_pct
     txn_unit = txn_cost_bps / 10000.0
 
-    exercised_list, premium_pct_port_list, payoff_pct_port_list = [], [], []
-    txn_pct_port_list, net_pnl_list, hedged_ret_list = [], [], []
-
-    for _, row in results_df.iterrows():
-        period = row["period"]
-        spx_ret = row["spx_return"]
-        port_ret = row["portfolio_return_adjusted"]
-        beta = beta_map.get(period, np.nan)
+    rows = []
+    for rp in rebalance_periods:
+        spx_ret = market["spx_return"].get(rp, np.nan)
+        beta = beta_map.get(rp, np.nan)
 
         if pd.isna(beta) or pd.isna(spx_ret):
-            exercised_list.append(False)
-            premium_pct_port_list.append(0.0)
-            payoff_pct_port_list.append(0.0)
-            txn_pct_port_list.append(0.0)
-            net_pnl_list.append(0.0)
-            hedged_ret_list.append(port_ret)
+            rows.append({
+                "period": rp, "exercised": False, "notional": 0.0,
+                "premium_paid_pct_port": 0.0, "payoff_pct_port": 0.0, "txn_cost_pct_port": 0.0,
+                "capital_weight": 0.0, "return_contribution": 0.0,
+            })
             continue
 
         notional = beta
-        premium_paid_pct_port = premium_pct * notional
-
+        premium_paid = premium_pct * notional
         spx_level_end = 1 + spx_ret
         itm = spx_level_end < strike_pct
-        payoff_raw_pct = max(strike_pct - spx_level_end, 0.0) * (1 - counterparty_haircut)
-        payoff_pct_port = payoff_raw_pct * notional
+        payoff_raw = max(strike_pct - spx_level_end, 0.0) * (1 - counterparty_haircut)
+        payoff = payoff_raw * notional
+        txn_cost = txn_unit * (2 if itm else 1) * notional
+        net_pnl = payoff - premium_paid - txn_cost
 
-        txn_cost_pct_port = txn_unit * (2 if itm else 1) * notional
-
-        net_pnl = payoff_pct_port - premium_paid_pct_port - txn_cost_pct_port
-        hedged_ret = port_ret + net_pnl
-
-        exercised_list.append(bool(itm))
-        premium_pct_port_list.append(premium_paid_pct_port)
-        payoff_pct_port_list.append(payoff_pct_port)
-        txn_pct_port_list.append(txn_cost_pct_port)
-        net_pnl_list.append(net_pnl)
-        hedged_ret_list.append(hedged_ret)
-
-    results_df["exercised"] = exercised_list
-    results_df["premium_paid_pct_port"] = premium_pct_port_list
-    results_df["payoff_pct_port"] = payoff_pct_port_list
-    results_df["txn_cost_pct_port"] = txn_pct_port_list
-    results_df["net_hedge_pnl_pct_port"] = net_pnl_list
-    results_df["hedged_return"] = hedged_ret_list
-    results_df["hedged_cumulative_return"] = (1 + results_df["hedged_return"]).cumprod() - 1
-
-    # Rescale period-relative hedge cash flows into "% of INITIAL investment" terms —
-    # value_start is cumulative hedged wealth at the START of that period (1.0 in period 1,
-    # growing thereafter), exactly as the original script does. This is what makes premium
-    # paid and payoff received grow over time in dollar terms, even though the underlying
-    # rate (% of that period's notional) is constant.
-    results_df["value_start"] = (1 + results_df["hedged_cumulative_return"].shift(1)).fillna(1.0)
-    results_df["premium_paid_pct_initial"] = results_df["premium_paid_pct_port"] * results_df["value_start"]
-    results_df["payoff_pct_initial"] = results_df["payoff_pct_port"] * results_df["value_start"]
-    results_df["txn_cost_pct_initial"] = results_df["txn_cost_pct_port"] * results_df["value_start"]
-
-    return results_df
+        rows.append({
+            "period": rp, "exercised": bool(itm), "notional": notional,
+            "premium_paid_pct_port": premium_paid, "payoff_pct_port": payoff,
+            "txn_cost_pct_port": txn_cost,
+            "capital_weight": premium_paid + txn_cost,
+            "return_contribution": net_pnl,
+        })
+    return pd.DataFrame(rows)
 
 
-def run_long_only_backtest(
+def build_long_call_leg(rebalance_periods, market, strike_pct, premium_pct, sizing_mode,
+                         fixed_pct=None, weight_pct=None):
+    """
+    sizing_mode == "fixed":
+      notional = fixed_pct (relative to $1 portfolio value), recalculated fresh
+      each period. Capital spent = notional * premium_pct.
+    sizing_mode == "weight":
+      capital spent = weight_pct (spend this fraction of that period's
+      portfolio value fully on premium). notional = capital_spent / premium_pct.
+    """
+    rows = []
+    for rp in rebalance_periods:
+        spx_ret = market["spx_return"].get(rp, np.nan)
+        if pd.isna(spx_ret) or premium_pct <= 0:
+            rows.append({
+                "period": rp, "exercised": False, "notional": 0.0,
+                "premium_paid_pct_port": 0.0, "payoff_pct_port": 0.0,
+                "capital_weight": 0.0, "return_contribution": 0.0,
+            })
+            continue
+
+        if sizing_mode == "fixed":
+            notional = fixed_pct if fixed_pct is not None else 0.0
+            premium_paid = notional * premium_pct
+        elif sizing_mode == "weight":
+            premium_paid = weight_pct if weight_pct is not None else 0.0
+            notional = premium_paid / premium_pct
+        else:
+            raise ValueError(f"Unknown sizing_mode {sizing_mode!r}")
+
+        spx_level_end = 1 + spx_ret
+        payoff_pct_of_notional = max(spx_level_end - strike_pct, 0.0)
+        payoff = payoff_pct_of_notional * notional
+        itm = payoff_pct_of_notional > 0
+        net_pnl = payoff - premium_paid
+
+        rows.append({
+            "period": rp, "exercised": bool(itm), "notional": notional,
+            "premium_paid_pct_port": premium_paid, "payoff_pct_port": payoff,
+            "capital_weight": premium_paid,
+            "return_contribution": net_pnl,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_short_call_leg(rebalance_periods, market, strike_pct, premium_pct, notional_pct):
+    """
+    Premium-income overlay. No margin/collateral accounting: capital_weight is
+    always 0, so this leg never contributes to net_gearing. "notional" is
+    still tracked on the results_df for a dedicated short-exposure chart.
+    notional_pct: fixed fraction of portfolio value, recalculated fresh each period.
+    """
+    rows = []
+    for rp in rebalance_periods:
+        spx_ret = market["spx_return"].get(rp, np.nan)
+        if pd.isna(spx_ret) or premium_pct < 0:
+            rows.append({
+                "period": rp, "exercised": False, "notional": 0.0,
+                "premium_received_pct_port": 0.0, "payoff_owed_pct_port": 0.0,
+                "capital_weight": 0.0, "return_contribution": 0.0,
+            })
+            continue
+
+        notional = notional_pct
+        premium_received = notional * premium_pct
+        spx_level_end = 1 + spx_ret
+        payoff_pct_of_notional = max(spx_level_end - strike_pct, 0.0)
+        payoff_owed = payoff_pct_of_notional * notional
+        itm = payoff_pct_of_notional > 0
+        net_pnl = premium_received - payoff_owed
+
+        rows.append({
+            "period": rp, "exercised": bool(itm), "notional": notional,
+            "premium_received_pct_port": premium_received, "payoff_owed_pct_port": payoff_owed,
+            "capital_weight": 0.0,
+            "return_contribution": net_pnl,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_short_put_leg(rebalance_periods, market, strike_pct, premium_pct, notional_pct):
+    """
+    Premium-income overlay. No margin/collateral accounting: capital_weight is
+    always 0, so this leg never contributes to net_gearing. "notional" is
+    still tracked on the results_df for a dedicated short-exposure chart.
+    notional_pct: fixed fraction of portfolio value, recalculated fresh each period.
+    """
+    rows = []
+    for rp in rebalance_periods:
+        spx_ret = market["spx_return"].get(rp, np.nan)
+        if pd.isna(spx_ret) or premium_pct < 0:
+            rows.append({
+                "period": rp, "exercised": False, "notional": 0.0,
+                "premium_received_pct_port": 0.0, "payoff_owed_pct_port": 0.0,
+                "capital_weight": 0.0, "return_contribution": 0.0,
+            })
+            continue
+
+        notional = notional_pct
+        premium_received = notional * premium_pct
+        spx_level_end = 1 + spx_ret
+        payoff_pct_of_notional = max(strike_pct - spx_level_end, 0.0)
+        payoff_owed = payoff_pct_of_notional * notional
+        itm = payoff_pct_of_notional > 0
+        net_pnl = premium_received - payoff_owed
+
+        rows.append({
+            "period": rp, "exercised": bool(itm), "notional": notional,
+            "premium_received_pct_port": premium_received, "payoff_owed_pct_port": payoff_owed,
+            "capital_weight": 0.0,
+            "return_contribution": net_pnl,
+        })
+    return pd.DataFrame(rows)
+
+
+LEG_BUILDERS = {
+    "long_portfolio": build_long_portfolio_leg,
+    "short_portfolio": build_short_portfolio_leg,
+    "long_put": build_long_put_leg,
+    "long_call": build_long_call_leg,
+    "short_call": build_short_call_leg,
+    "short_put": build_short_put_leg,
+}
+
+# Legs whose capital_weight participates in the gearing calc. Short options
+# are intentionally excluded (see docstrings above) — kept here as an explicit
+# allowlist so the exclusion is a visible design decision, not an accident.
+GEARING_ELIGIBLE_TYPES = {"long_portfolio", "short_portfolio", "long_put", "long_call"}
+SHORT_EXPOSURE_TYPES = {"short_call", "short_put"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Net Portfolio combination (capital ledger + financing/gearing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available, risk_free_rate):
+    rows = []
+    for rp in rebalance_periods:
+        total_capital = 0.0
+        total_return = 0.0
+        total_short_exposure = 0.0
+
+        for leg_key, leg_df in leg_frames.items():
+            match = leg_df[leg_df["period"] == rp]
+            if not len(match):
+                continue
+            row = match.iloc[0]
+            total_return += float(row["return_contribution"])
+
+            leg_type = leg_types.get(leg_key)
+            if leg_type in GEARING_ELIGIBLE_TYPES:
+                total_capital += float(row["capital_weight"])
+            elif leg_type in SHORT_EXPOSURE_TYPES:
+                total_short_exposure += float(row.get("notional", 0.0))
+
+        n_months = len(months_in_period(rp, frequency, available))
+        period_rf = (1 + risk_free_rate) ** (n_months / 12.0) - 1 if n_months else 0.0
+        excess = total_capital - 1.0
+        financing_return = -excess * period_rf
+        net_return = total_return + financing_return
+
+        rows.append({
+            "period": rp,
+            "net_capital_weight": total_capital,
+            "net_gearing": total_capital,
+            "excess_capital": excess,
+            "period_risk_free_rate": period_rf,
+            "financing_return": financing_return,
+            "leg_return_contribution": total_return,
+            "net_return": net_return,
+            "short_exposure": total_short_exposure,
+        })
+
+    net_df = pd.DataFrame(rows).sort_values("period").reset_index(drop=True)
+    net_df["net_cumulative_return"] = (1 + net_df["net_return"]).cumprod() - 1
+    return net_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Leg-level metrics (return on capital actually deployed to that leg)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_leg_metrics(leg_df, frequency, risk_frequency, rolling_window, ppy):
+    df = leg_df.copy()
+    if "capital_weight" in df.columns and df["capital_weight"].abs().sum() > 0:
+        df["leg_return"] = np.where(
+            df["capital_weight"] > 0,
+            df["return_contribution"] / df["capital_weight"],
+            df["return_contribution"],
+        )
+    else:
+        # capital-neutral legs (short options): report return_contribution directly,
+        # since there's no capital base to divide by.
+        df["leg_return"] = df["return_contribution"]
+    return compute_metrics(df, "leg_return", frequency, risk_frequency, rolling_window, ppy)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_backtest(
     start_year, start_month, end_year, end_month,
+    legs,
     input_dir=INPUT_DIR,
     portfolio_file=PORTFOLIO_FILE,
     returns_file=RETURNS_FILE,
@@ -477,24 +814,18 @@ def run_long_only_backtest(
     frequency=FREQUENCY,
     risk_frequency=RISK_FREQUENCY,
     rolling_window=ROLLING_WINDOW,
-    weight_pct=1.0,
-    long_put=None,
+    risk_free_rate=RISK_FREE_RATE,
 ):
     """
-    Runs the long-only portfolio backtest, optionally with a long put overlay.
+    legs: list of {"key": str, "type": one of LEG_BUILDERS, "label": str, "params": dict}
+    Every leg type's params map directly onto its builder function's kwargs
+    (excluding rebalance_periods/market, which are supplied internally).
 
-    long_put: optional dict {
-        "otm_pct": float,            # e.g. 0.10 for 10% OTM
-        "premium_pct": float,        # e.g. 0.0419
-        "notional_method": str,      # "real-beta" | "dynamic-beta" | "custom"
-        "custom_beta": float|None,
-        "txn_cost_bps": float,       # optional, defaults to 10.0
-        "counterparty_haircut": float,  # optional, defaults to 0.0
-    }
-    If None, hedged fields simply mirror unhedged fields (no overlay).
-
-    Returns (results_df, metrics_dict) where metrics_dict has keys
-    "unhedged", "hedged", "put_stats".
+    Returns a dict:
+      {
+        "net": {"results_df": ..., "metrics": {...}},
+        "legs": {leg_key: {"results_df": ..., "metrics": {...}, "label": ..., "type": ...}},
+      }
     """
     ppy = periods_per_year(frequency)
 
@@ -515,175 +846,80 @@ def run_long_only_backtest(
     rebalance_periods = periods_for_frequency(available, frequency)
     portfolio_by_period = {p: g for p, g in portfolio.groupby("period")}
 
-    results = []
-    monthly_port_rets = {}
-    tickers_by_period = {}
+    market = build_market_context(
+        rebalance_periods, frequency, available, returns_df, norm_to_orig,
+        index_df, benchmark_ticker, portfolio_by_period,
+    )
 
-    for rebal_period in rebalance_periods:
-        weight_period = period_start(rebal_period, frequency)
-        if weight_period not in portfolio_by_period:
-            continue
-        port_group = portfolio_by_period[weight_period]
-        sub_months = months_in_period(rebal_period, frequency, available)
-        if not sub_months:
-            continue
-
-        weighted_returns, total_weight_used = [], 0.0
-        monthly_weighted = {m: [] for m in sub_months}
-        monthly_weights = {m: 0.0 for m in sub_months}
-        tickers_by_period[rebal_period] = set(port_group["ticker"].tolist())
-
-        for _, prow in port_group.iterrows():
-            ticker_norm = prow["ticker"]
-            weight = prow["weight"] * weight_pct
-            orig_ticker = norm_to_orig.get(ticker_norm)
-            if orig_ticker is None:
-                continue
-
-            monthly_rets, skip = [], False
-            for m in sub_months:
-                if m not in returns_df.columns:
-                    skip = True
-                    break
-                r = returns_df.loc[orig_ticker, m]
-                if isinstance(r, pd.Series):
-                    r = r.iloc[0]
-                if pd.isna(r):
-                    skip = True
-                    break
-                monthly_rets.append(r)
-            if skip or not monthly_rets:
-                continue
-
-            compounded = np.prod([1 + r for r in monthly_rets]) - 1
-            weighted_returns.append(compounded * weight)
-            total_weight_used += weight
-            for m, r in zip(sub_months, monthly_rets):
-                monthly_weighted[m].append(r * weight)
-                monthly_weights[m] += weight
-
-        if weighted_returns:
-            raw_return = sum(weighted_returns)
-            adjusted_return = raw_return / total_weight_used if total_weight_used > 0 else np.nan
-            for m in sub_months:
-                if monthly_weights[m] > 0:
-                    monthly_port_rets[m] = sum(monthly_weighted[m]) / monthly_weights[m]
-
-            spx_ret = None
-            if benchmark_ticker in index_df.index:
-                spx_rets = []
-                ok = True
-                for m in sub_months:
-                    if m not in index_df.columns:
-                        ok = False
-                        break
-                    r = index_df.loc[benchmark_ticker, m]
-                    if isinstance(r, pd.Series):
-                        r = r.iloc[0]
-                    if pd.isna(r):
-                        ok = False
-                        break
-                    spx_rets.append(r)
-                if ok and spx_rets:
-                    spx_ret = np.prod([1 + r for r in spx_rets]) - 1
-
-            results.append({
-                "period": rebal_period,
-                "date": rebal_period.to_timestamp(how="end").normalize(),
-                "portfolio_return_adjusted": adjusted_return,
-                "spx_return": spx_ret,
-                "weight_coverage": total_weight_used,
-                "n_holdings": len(weighted_returns),
-            })
-
-    if not results:
+    if not market["raw_portfolio_return"] and any(
+        leg["type"] in ("long_portfolio", "short_portfolio") for leg in legs
+    ):
         raise RuntimeError("Backtest produced zero results. Check portfolio dates align with rebalance periods.")
 
-    results_df = pd.DataFrame(results).sort_values("period").reset_index(drop=True)
-    results_df["cumulative_return"] = (1 + results_df["portfolio_return_adjusted"]).cumprod() - 1
+    leg_frames, leg_meta, leg_types = {}, {}, {}
+    for leg_cfg in legs:
+        leg_key = leg_cfg["key"]
+        leg_type = leg_cfg["type"]
+        builder = LEG_BUILDERS.get(leg_type)
+        if builder is None:
+            raise ValueError(f"Unknown leg type {leg_type!r}")
+        leg_df = builder(rebalance_periods, market, **leg_cfg.get("params", {}))
+        leg_frames[leg_key] = leg_df
+        leg_meta[leg_key] = {"label": leg_cfg.get("label", leg_key), "type": leg_type}
+        leg_types[leg_key] = leg_type
 
-    if long_put is not None:
-        results_df = apply_long_put_overlay(
-            results_df,
-            otm_pct=long_put["otm_pct"],
-            premium_pct=long_put["premium_pct"],
-            notional_method=long_put["notional_method"],
-            custom_beta=long_put.get("custom_beta"),
-            txn_cost_bps=long_put.get("txn_cost_bps", TRANSACTION_COST_BPS),
-            counterparty_haircut=long_put.get("counterparty_haircut", COUNTERPARTY_HAIRCUT),
-        )
-    else:
-        results_df["exercised"] = False
-        results_df["premium_paid_pct_initial"] = 0.0
-        results_df["payoff_pct_initial"] = 0.0
-        results_df["txn_cost_pct_initial"] = 0.0
-        results_df["net_hedge_pnl_pct_port"] = 0.0
-        results_df["hedged_return"] = results_df["portfolio_return_adjusted"]
-        results_df["hedged_cumulative_return"] = results_df["cumulative_return"]
+    net_df = combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available, risk_free_rate)
 
-    unhedged_metrics = compute_metrics(
-        results_df, "portfolio_return_adjusted", frequency, risk_frequency, rolling_window, ppy,
-        monthly_returns_map=monthly_port_rets,
+    net_metrics = compute_metrics(
+        net_df.rename(columns={"net_return": "_ret"}), "_ret", frequency, risk_frequency, rolling_window, ppy,
+        monthly_returns_map=market["monthly_port_rets"] if len(legs) == 1 and legs[0]["type"] == "long_portfolio" else None,
     )
-    hedged_metrics = compute_metrics(
-        results_df, "hedged_return", frequency, risk_frequency, rolling_window, ppy,
-        monthly_returns_map=None,  # matches original: no true monthly hedged-return series exists
+    bench = compute_benchmark_stats(
+        net_df.rename(columns={"net_return": "_ret"}), "_ret", index_df, benchmark_ticker, frequency, available, ppy,
+        net_metrics.get("annualised_return", np.nan),
     )
+    if bench is not None:
+        net_metrics["benchmark"] = bench[0]
 
-    bench_unhedged = compute_benchmark_stats(
-        results_df, "portfolio_return_adjusted", index_df, benchmark_ticker, frequency, available, ppy,
-        unhedged_metrics["annualised_return"],
-    )
-    bench_hedged = compute_benchmark_stats(
-        results_df, "hedged_return", index_df, benchmark_ticker, frequency, available, ppy,
-        hedged_metrics["annualised_return"],
-    )
-    if bench_unhedged is not None:
-        unhedged_metrics["benchmark"] = bench_unhedged[0]
-    if bench_hedged is not None:
-        hedged_metrics["benchmark"] = bench_hedged[0]
-
-    avg_holdings = float(results_df["n_holdings"].mean())
-    sorted_ps = sorted(tickers_by_period.keys())
+    sorted_ps = sorted(market["tickers_by_period"].keys())
     turnover_rates = []
     for i in range(1, len(sorted_ps)):
-        prev = tickers_by_period[sorted_ps[i - 1]]
-        curr = tickers_by_period[sorted_ps[i]]
+        prev = market["tickers_by_period"][sorted_ps[i - 1]]
+        curr = market["tickers_by_period"][sorted_ps[i]]
         union = len(prev | curr)
         if union > 0:
             turnover_rates.append((len(curr - prev) + len(prev - curr)) / union)
-    avg_turnover = float(np.mean(turnover_rates)) if turnover_rates else None
+    net_metrics["avg_turnover"] = float(np.mean(turnover_rates)) if turnover_rates else None
+    if market["holdings_count"]:
+        net_metrics["avg_holdings"] = float(np.mean(list(market["holdings_count"].values())))
 
-    n_years = len(results_df)
-    n_exercised = int(results_df["exercised"].sum())
-    total_premium = float(results_df["premium_paid_pct_initial"].sum())
-    total_payoff = float(results_df["payoff_pct_initial"].sum())
-    net_cost = total_premium - total_payoff
-    corr_eff = None
-    if results_df["net_hedge_pnl_pct_port"].std() > 0:
-        corr_eff = float(np.corrcoef(
-            results_df["portfolio_return_adjusted"], results_df["net_hedge_pnl_pct_port"]
-        )[0, 1])
-    dd_reduction = None
-    if pd.notna(unhedged_metrics["max_drawdown"]) and pd.notna(hedged_metrics["max_drawdown"]):
-        dd_reduction = float(abs(unhedged_metrics["max_drawdown"]) - abs(hedged_metrics["max_drawdown"]))
+    legs_out = {}
+    for leg_key, leg_df in leg_frames.items():
+        leg_metrics = compute_leg_metrics(leg_df, frequency, risk_frequency, rolling_window, ppy)
+        if "exercised" in leg_df.columns:
+            n_periods_leg = len(leg_df)
+            n_exercised = int(leg_df["exercised"].sum())
+            premium_col = "premium_paid_pct_port" if "premium_paid_pct_port" in leg_df.columns else "premium_received_pct_port"
+            payoff_col = "payoff_pct_port" if "payoff_pct_port" in leg_df.columns else "payoff_owed_pct_port"
+            total_premium = float(leg_df[premium_col].sum())
+            total_payoff = float(leg_df[payoff_col].sum())
+            leg_metrics["option_stats"] = {
+                "n_periods": n_periods_leg,
+                "n_exercised": n_exercised,
+                "exercise_rate": (n_exercised / n_periods_leg) if n_periods_leg else 0.0,
+                "total_premium_pct_port": total_premium,
+                "total_payoff_pct_port": total_payoff,
+                "net_cost_pct_port": total_premium - total_payoff,
+                "avg_notional": float(leg_df["notional"].mean()) if "notional" in leg_df.columns else None,
+            }
+        legs_out[leg_key] = {
+            "results_df": leg_df,
+            "metrics": leg_metrics,
+            "label": leg_meta[leg_key]["label"],
+            "type": leg_meta[leg_key]["type"],
+        }
 
-    put_stats = {
-        "exercise_rate": (n_exercised / n_years) if n_years else 0.0,
-        "n_exercised": n_exercised,
-        "n_years": n_years,
-        "total_premium_paid_pct_initial": total_premium,
-        "total_payoff_received_pct_initial": total_payoff,
-        "net_hedge_cost_pct_initial": net_cost,
-        "avg_annual_premium_drag": total_premium / n_years if n_years else 0.0,
-        "hedge_effectiveness_corr": corr_eff,
-        "drawdown_reduction": dd_reduction,
-        "avg_holdings": avg_holdings,
-        "avg_turnover": avg_turnover,
-    }
-
-    return results_df, {
-        "unhedged": unhedged_metrics,
-        "hedged": hedged_metrics,
-        "put_stats": put_stats,
+    return {
+        "net": {"results_df": net_df, "metrics": net_metrics},
+        "legs": legs_out,
     }
