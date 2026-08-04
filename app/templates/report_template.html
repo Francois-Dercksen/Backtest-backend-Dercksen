@@ -305,21 +305,28 @@ if (hasShortOptionExposure || hasShortPortfolioExposure) {
   document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p class="no-data">No Short Portfolio, Short Call, or Short Put legs active in this backtest.</p>';
 }
 
-/* ---------- PER-LEG SECTIONS (Strategy Legs tab) ---------- */
+/* ---------- PER-LEG SECTIONS (Strategy Legs tab) ----------
+   leg.metrics has the shape: { contribution: {...}, strategy: {...}, option_stats?: {...} }
+   - contribution: how much this leg moved the Net Portfolio (fraction of $1 total equity)
+   - strategy: how the strategy performed on its own (return / notional)          */
 const legsContainer = document.getElementById('legsContainer');
 Object.entries(LEGS).forEach(([legKey, leg], idx) => {
   const block = document.createElement('div');
   block.className = 'leg-block';
 
-  const m = leg.metrics || {};
-  const opt = m.option_stats;
+  const metrics = leg.metrics || {};
+  const contrib = metrics.contribution || {};
+  const strat = metrics.strategy || {};
+  const opt = metrics.option_stats;
 
   let cardsHtml = `
     <div class="cards">
-      <div class="card ${m.annualised_return>0?'pos':'neg'}"><div class="label">Contribution (Ann.)</div><div class="value">${fmtPct(m.annualised_return)}</div><div class="sub">As % of $1 total equity</div></div>
-      <div class="card"><div class="label">Sharpe</div><div class="value">${fmtNum(m.sharpe)}</div></div>
-      <div class="card neg"><div class="label">Max Drawdown</div><div class="value">${fmtPct(m.max_drawdown)}</div></div>
-      <div class="card"><div class="label">Hit Rate</div><div class="value">${fmtPct(m.hit_rate)}</div></div>
+      <div class="card ${contrib.annualised_return>0?'pos':'neg'}"><div class="label">Contribution (Ann.)</div><div class="value">${fmtPct(contrib.annualised_return)}</div><div class="sub">As % of $1 total equity</div></div>
+      <div class="card ${strat.annualised_return>0?'pos':'neg'}"><div class="label">Strategy CAGR</div><div class="value">${fmtPct(strat.annualised_return)}</div><div class="sub">Standalone return on this strategy's own notional</div></div>
+      <div class="card"><div class="label">Strategy Sortino</div><div class="value">${fmtNum(strat.sortino)}</div><div class="sub">Standalone return / downside deviation</div></div>
+      <div class="card"><div class="label">Sharpe</div><div class="value">${fmtNum(contrib.sharpe)}</div></div>
+      <div class="card neg"><div class="label">Max Drawdown</div><div class="value">${fmtPct(contrib.max_drawdown)}</div></div>
+      <div class="card"><div class="label">Hit Rate</div><div class="value">${fmtPct(contrib.hit_rate)}</div></div>
   `;
   if (opt) {
     cardsHtml += `
@@ -359,8 +366,8 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
     const payoffField = leg.periods[0] && ('payoff_pct_port' in leg.periods[0]) ? 'payoff_pct_port' : 'payoff_owed_pct_port';
     const isLongOption = premiumField === 'premium_paid_pct_port';
 
-    /* Rolling net cost (mirrors the old "Rolling Net Hedge Cost" chart; now the only
-       option-mechanics chart per leg, replacing the removed Premium vs Payoff chart) */
+    /* Rolling net cost (mirrors the old "Rolling Net Hedge Cost" chart; the only
+       option-mechanics chart per leg since Premium vs Payoff was removed) */
     let cp = 0, cpay = 0;
     const cumPrem = [], cumPay = [], cumNet = [];
     leg.periods.forEach(p => {
