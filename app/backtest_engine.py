@@ -386,9 +386,8 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
     otm_pct: e.g. 0.10 means strike = 90% of spot (10% OTM).
     premium_pct: annual premium as % of notional, e.g. 0.0419.
     notional_method: "real-beta" | "dynamic-beta" | "custom".
-    txn_cost_bps: one-way transaction cost in bps, charged once at purchase and again if exercised.
+    txn_cost_bps: one-way transaction cost in bps, charged at purchase and again if exercised.
     counterparty_haircut: fraction of payoff lost to settlement friction (0 = none).
-    Returns results_df with hedge fields populated.
     """
     results_df = results_df.copy()
 
@@ -406,10 +405,11 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
     else:
         raise ValueError(f"Unknown notional_method {notional_method!r}")
 
-    strike_pct = 1 - otm_pct  # e.g. otm=0.10 -> strike at 90% of spot
+    strike_pct = 1 - otm_pct
     txn_unit = txn_cost_bps / 10000.0
 
-    exercised_list, premium_list, payoff_list, txn_list, net_pnl_list, hedged_ret_list = [], [], [], [], [], []
+    exercised_list, premium_pct_port_list, payoff_pct_port_list = [], [], []
+    txn_pct_port_list, net_pnl_list, hedged_ret_list = [], [], []
 
     for _, row in results_df.iterrows():
         period = row["period"]
@@ -419,41 +419,50 @@ def apply_long_put_overlay(results_df, otm_pct, premium_pct, notional_method, cu
 
         if pd.isna(beta) or pd.isna(spx_ret):
             exercised_list.append(False)
-            premium_list.append(0.0)
-            payoff_list.append(0.0)
-            txn_list.append(0.0)
+            premium_pct_port_list.append(0.0)
+            payoff_pct_port_list.append(0.0)
+            txn_pct_port_list.append(0.0)
             net_pnl_list.append(0.0)
             hedged_ret_list.append(port_ret)
             continue
 
         notional = beta
-        premium_paid = premium_pct * notional
+        premium_paid_pct_port = premium_pct * notional
 
         spx_level_end = 1 + spx_ret
         itm = spx_level_end < strike_pct
-        payoff_raw = max(strike_pct - spx_level_end, 0.0) * (1 - counterparty_haircut)
-        payoff = payoff_raw * notional
+        payoff_raw_pct = max(strike_pct - spx_level_end, 0.0) * (1 - counterparty_haircut)
+        payoff_pct_port = payoff_raw_pct * notional
 
-        txn_cost_pct = txn_unit * (2 if itm else 1)
-        txn_cost = txn_cost_pct * notional
+        txn_cost_pct_port = txn_unit * (2 if itm else 1) * notional
 
-        net_pnl = payoff - premium_paid - txn_cost
+        net_pnl = payoff_pct_port - premium_paid_pct_port - txn_cost_pct_port
         hedged_ret = port_ret + net_pnl
 
         exercised_list.append(bool(itm))
-        premium_list.append(premium_paid)
-        payoff_list.append(payoff)
-        txn_list.append(txn_cost)
+        premium_pct_port_list.append(premium_paid_pct_port)
+        payoff_pct_port_list.append(payoff_pct_port)
+        txn_pct_port_list.append(txn_cost_pct_port)
         net_pnl_list.append(net_pnl)
         hedged_ret_list.append(hedged_ret)
 
     results_df["exercised"] = exercised_list
-    results_df["premium_paid_pct_initial"] = premium_list
-    results_df["payoff_pct_initial"] = payoff_list
-    results_df["txn_cost_pct_initial"] = txn_list
+    results_df["premium_paid_pct_port"] = premium_pct_port_list
+    results_df["payoff_pct_port"] = payoff_pct_port_list
+    results_df["txn_cost_pct_port"] = txn_pct_port_list
     results_df["net_hedge_pnl_pct_port"] = net_pnl_list
     results_df["hedged_return"] = hedged_ret_list
     results_df["hedged_cumulative_return"] = (1 + results_df["hedged_return"]).cumprod() - 1
+
+    # Rescale period-relative hedge cash flows into "% of INITIAL investment" terms —
+    # value_start is cumulative hedged wealth at the START of that period (1.0 in period 1,
+    # growing thereafter), exactly as the original script does. This is what makes premium
+    # paid and payoff received grow over time in dollar terms, even though the underlying
+    # rate (% of that period's notional) is constant.
+    results_df["value_start"] = (1 + results_df["hedged_cumulative_return"].shift(1)).fillna(1.0)
+    results_df["premium_paid_pct_initial"] = results_df["premium_paid_pct_port"] * results_df["value_start"]
+    results_df["payoff_pct_initial"] = results_df["payoff_pct_port"] * results_df["value_start"]
+    results_df["txn_cost_pct_initial"] = results_df["txn_cost_pct_port"] * results_df["value_start"]
 
     return results_df
 
