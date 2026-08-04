@@ -21,6 +21,8 @@
   .tab-panel { display:none; }
   .tab-panel.active { display:block; }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0 24px; }
+  .cards.headline .card { padding:18px 18px; }
+  .cards.headline .value { font-size:26px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
   .card .label { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:5px; }
   .card .value { font-size:20px; font-weight:700; }
@@ -46,6 +48,7 @@
   .pill.yes { background:rgba(229,72,77,.12); color:var(--red); }
   .pill.no { background:rgba(31,174,122,.12); color:var(--green); }
   .leg-block { margin-bottom:36px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  .no-data { color:var(--muted); font-size:12px; padding:1rem 0; }
 </style>
 </head>
 <body>
@@ -56,24 +59,37 @@
 <div class="wrap">
   <div class="tabs" id="tabs">
     <button class="tab-btn active" data-tab="tab-overview">Overview</button>
-    <button class="tab-btn" data-tab="tab-netportfolio">Net Portfolio</button>
     <button class="tab-btn" data-tab="tab-legs">Strategy Legs</button>
     <button class="tab-btn" data-tab="tab-table">Period Table</button>
   </div>
 
+  <!-- OVERVIEW: headline cards, benchmark cards, then the full classic chart set -->
   <div class="tab-panel active" id="tab-overview">
     <div class="section-title">Net Portfolio Summary</div>
-    <div class="cards" id="headlineCards"></div>
+    <div class="cards headline" id="headlineCards"></div>
+
     <div class="section-title">Benchmark Comparison</div>
     <div class="cards" id="benchmarkCards"></div>
-  </div>
 
-  <div class="tab-panel" id="tab-netportfolio">
+    <div class="section-title">Returns</div>
+    <div class="grid2">
+      <div class="panel full">
+        <h3>Annual Returns: Net Portfolio vs SPX</h3>
+        <div class="desc">Period-by-period return comparison</div>
+        <canvas id="returnsChart"></canvas>
+      </div>
+    </div>
+
     <div class="section-title">Performance</div>
     <div class="grid2">
       <div class="panel"><h3>Cumulative Return</h3><div class="desc">Net portfolio vs benchmark, wealth index starting at 0</div><canvas id="cumChart"></canvas></div>
       <div class="panel"><h3>Drawdown</h3><div class="desc">Peak-to-trough decline of the net portfolio</div><canvas id="drawdownChart"></canvas></div>
     </div>
+    <div class="grid2">
+      <div class="panel"><h3>Annual Alpha vs SPX</h3><div class="desc">Net portfolio return minus benchmark return per period</div><canvas id="alphaChart"></canvas></div>
+      <div class="panel"><h3>Holdings per Period</h3><div class="desc">Number of long-portfolio positions held each period</div><canvas id="holdingsChart"></canvas></div>
+    </div>
+
     <div class="section-title">Capital &amp; Financing</div>
     <div class="grid2">
       <div class="panel"><h3>Net Gearing</h3><div class="desc">Total capital allocated across gearing-eligible legs (1.0 = fully invested; above 1.0 = borrowing; below 1.0 = idle cash)</div><canvas id="gearingChart"></canvas></div>
@@ -81,6 +97,7 @@
     </div>
   </div>
 
+  <!-- STRATEGY LEGS: per-leg cards + return contribution + (for options) hedge mechanics charts -->
   <div class="tab-panel" id="tab-legs">
     <div id="legsContainer"></div>
   </div>
@@ -137,10 +154,10 @@ if (bm) {
   card(benchmarkCards, 'Down Capture', fmtPct(bm.down_capture), 'Capture of benchmark down-periods', bm.down_capture<1?'pos':'neg');
   card(benchmarkCards, 'Outperformance Rate', fmtPct(bm.outperf_rate), '% of periods beating benchmark');
 } else {
-  benchmarkCards.innerHTML = '<p style="color:var(--muted);font-size:12px;">No benchmark overlap available for this backtest window.</p>';
+  benchmarkCards.innerHTML = '<p class="no-data">No benchmark overlap available for this backtest window.</p>';
 }
 
-/* ---------- CHARTS ---------- */
+/* ---------- SHARED CHART SETUP ---------- */
 const labels = NET_PERIODS.map(r => r.period);
 let chartInstances = [];
 const baseOpts = {
@@ -148,6 +165,17 @@ const baseOpts = {
   scales:{ x:{grid:{color:'rgba(20,20,43,0.06)'}}, y:{grid:{color:'rgba(20,20,43,0.06)'}} },
 };
 
+/* ---------- RETURNS (Net Portfolio vs SPX) ---------- */
+const hasSpxSeries = NET_PERIODS.some(r => r.spx_return_used !== undefined && r.spx_return_used !== null);
+chartInstances.push(new Chart(document.getElementById('returnsChart'), {
+  type:'line', data:{ labels, datasets:[
+    { label:'SPX', data: NET_PERIODS.map(r=>r.spx_return_used!=null ? r.spx_return_used*100 : null), borderColor:'#6b7280', tension:0.2 },
+    { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_return*100), borderColor:'#3b5bfd', tension:0.2, borderWidth:2.5 },
+  ]},
+  options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+}));
+
+/* ---------- CUMULATIVE RETURN ---------- */
 chartInstances.push(new Chart(document.getElementById('cumChart'), {
   type:'line', data:{ labels, datasets:[
     { label:'Net Portfolio', data: NET_PERIODS.map(r=>r.net_cumulative_return*100), borderColor:'#3b5bfd', tension:0.25 },
@@ -155,6 +183,7 @@ chartInstances.push(new Chart(document.getElementById('cumChart'), {
   options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
 }));
 
+/* ---------- DRAWDOWN ---------- */
 function drawdownSeries(cumArr) {
   let peak = -Infinity;
   return cumArr.map(c => { const level=1+c; peak=Math.max(peak,level); return (level-peak)/peak*100; });
@@ -166,6 +195,33 @@ chartInstances.push(new Chart(document.getElementById('drawdownChart'), {
   options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
 }));
 
+/* ---------- ANNUAL ALPHA VS SPX ---------- */
+if (hasSpxSeries) {
+  chartInstances.push(new Chart(document.getElementById('alphaChart'), {
+    type:'bar', data:{ labels, datasets:[
+      { label:'Alpha (Net - SPX)', data: NET_PERIODS.map(r=>(r.net_return-(r.spx_return_used||0))*100),
+        backgroundColor: NET_PERIODS.map(r=>(r.net_return-(r.spx_return_used||0))>=0?'#1fae7a':'#e5484d') },
+    ]},
+    options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Alpha: '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
+  }));
+} else {
+  document.getElementById('alphaChart').closest('.panel').innerHTML = '<h3>Annual Alpha vs SPX</h3><p class="no-data">Benchmark series not available for this run.</p>';
+}
+
+/* ---------- HOLDINGS PER PERIOD (from the long_portfolio leg, if present) ---------- */
+const longPortfolioLeg = Object.values(LEGS).find(l => l.type === 'long_portfolio');
+if (longPortfolioLeg) {
+  chartInstances.push(new Chart(document.getElementById('holdingsChart'), {
+    type:'bar', data:{ labels: longPortfolioLeg.periods.map(p=>p.period), datasets:[
+      { label:'Holdings', data: longPortfolioLeg.periods.map(p=>p.n_holdings ?? null), backgroundColor:'#3b5bfd' },
+    ]},
+    options:{...baseOpts, plugins:{legend:{display:false}}},
+  }));
+} else {
+  document.getElementById('holdingsChart').closest('.panel').innerHTML = '<h3>Holdings per Period</h3><p class="no-data">No Long Portfolio leg active in this backtest.</p>';
+}
+
+/* ---------- NET GEARING ---------- */
 chartInstances.push(new Chart(document.getElementById('gearingChart'), {
   type:'bar', data:{ labels, datasets:[
     { label:'Net Gearing', data: NET_PERIODS.map(r=>r.net_gearing), backgroundColor: NET_PERIODS.map(r=>r.net_gearing>1?'#e5484d':(r.net_gearing<1?'#e2a336':'#1fae7a')) },
@@ -173,6 +229,7 @@ chartInstances.push(new Chart(document.getElementById('gearingChart'), {
   options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Gearing: '+c.raw.toFixed(2)+'x'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'x'}}}},
 }));
 
+/* ---------- SHORT EXPOSURE ---------- */
 const hasShortExposure = NET_PERIODS.some(r => (r.short_exposure||0) !== 0);
 if (hasShortExposure) {
   chartInstances.push(new Chart(document.getElementById('shortExposureChart'), {
@@ -182,10 +239,10 @@ if (hasShortExposure) {
     options:{...baseOpts, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>'Exposure: '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
   }));
 } else {
-  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p style="color:var(--muted);font-size:12px;">No Short Call / Short Put legs active in this backtest.</p>';
+  document.getElementById('shortExposurePanel').innerHTML = '<h3>Short Exposure</h3><p class="no-data">No Short Call / Short Put legs active in this backtest.</p>';
 }
 
-/* ---------- PER-LEG SECTIONS ---------- */
+/* ---------- PER-LEG SECTIONS (Strategy Legs tab) ---------- */
 const legsContainer = document.getElementById('legsContainer');
 Object.entries(LEGS).forEach(([legKey, leg], idx) => {
   const block = document.createElement('div');
@@ -196,7 +253,7 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
 
   let cardsHtml = `
     <div class="cards">
-      <div class="card ${m.annualised_return>0?'pos':'neg'}"><div class="label">Return on Capital (Ann.)</div><div class="value">${fmtPct(m.annualised_return)}</div></div>
+      <div class="card ${m.annualised_return>0?'pos':'neg'}"><div class="label">Contribution (Ann.)</div><div class="value">${fmtPct(m.annualised_return)}</div><div class="sub">As % of $1 total equity</div></div>
       <div class="card"><div class="label">Sharpe</div><div class="value">${fmtNum(m.sharpe)}</div></div>
       <div class="card neg"><div class="label">Max Drawdown</div><div class="value">${fmtPct(m.max_drawdown)}</div></div>
       <div class="card"><div class="label">Hit Rate</div><div class="value">${fmtPct(m.hit_rate)}</div></div>
@@ -212,7 +269,8 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
   cardsHtml += `</div>`;
 
   const returnChartId = `legReturnChart_${idx}`;
-  const optionChartId = `legOptionChart_${idx}`;
+  const premiumPayoffChartId = `legPremiumPayoffChart_${idx}`;
+  const cumHedgeCostChartId = `legCumHedgeCostChart_${idx}`;
 
   block.innerHTML = `
     <div class="leg-heading">${leg.label}</div>
@@ -220,8 +278,12 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
     ${cardsHtml}
     <div class="grid2">
       <div class="panel"><h3>Return Contribution</h3><div class="desc">This leg's $ P&amp;L per period, as a fraction of $1 total equity</div><canvas id="${returnChartId}"></canvas></div>
-      ${opt ? `<div class="panel"><h3>Premium vs Payoff</h3><div class="desc">Per-period option cash flows for this leg</div><canvas id="${optionChartId}"></canvas></div>` : '<div></div>'}
+      ${opt ? `<div class="panel"><h3>Premium vs Payoff</h3><div class="desc">Per-period option cash flows for this leg</div><canvas id="${premiumPayoffChartId}"></canvas></div>` : '<div></div>'}
     </div>
+    ${opt ? `
+    <div class="grid2">
+      <div class="panel full"><h3>Rolling Net Option Cost</h3><div class="desc">Cumulative premium, payoff, and net cost for this leg over the backtest</div><canvas id="${cumHedgeCostChartId}"></canvas></div>
+    </div>` : ''}
   `;
   legsContainer.appendChild(block);
 
@@ -237,15 +299,34 @@ Object.entries(LEGS).forEach(([legKey, leg], idx) => {
   if (opt) {
     const premiumField = leg.periods[0] && ('premium_paid_pct_port' in leg.periods[0]) ? 'premium_paid_pct_port' : 'premium_received_pct_port';
     const payoffField = leg.periods[0] && ('payoff_pct_port' in leg.periods[0]) ? 'payoff_pct_port' : 'payoff_owed_pct_port';
-    const premiumSign = premiumField === 'premium_paid_pct_port' ? -1 : 1;
-    const payoffSign = payoffField === 'payoff_pct_port' ? 1 : -1;
+    const isLongOption = premiumField === 'premium_paid_pct_port';
 
-    chartInstances.push(new Chart(document.getElementById(optionChartId), {
+    /* Premium vs Payoff (mirrors the old "Hedge Mechanics" premium/payoff chart) */
+    chartInstances.push(new Chart(document.getElementById(premiumPayoffChartId), {
       type:'bar', data:{ labels: legLabels, datasets:[
-        { label: premiumSign<0?'Premium Paid':'Premium Received', data: leg.periods.map(p=>premiumSign*(p[premiumField]||0)*100), backgroundColor:'#e2a336' },
-        { label: payoffSign>0?'Payoff Received':'Payoff Owed', data: leg.periods.map(p=>payoffSign*(p[payoffField]||0)*100), backgroundColor: payoffSign>0?'#1fae7a':'#e5484d' },
+        { label: isLongOption?'Premium Paid':'Premium Received', data: leg.periods.map(p=>(isLongOption?-1:1)*(p[premiumField]||0)*100), backgroundColor:'#e2a336' },
+        { label: isLongOption?'Payoff Received':'Payoff Owed', data: leg.periods.map(p=>(isLongOption?1:-1)*(p[payoffField]||0)*100), backgroundColor: isLongOption?'#1fae7a':'#e5484d' },
       ]},
       options:{...baseOpts, scales:{...baseOpts.scales, x:{...baseOpts.scales.x, stacked:true}, y:{...baseOpts.scales.y, stacked:true, ticks:{callback:v=>v+'%'}}}, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}},
+    }));
+
+    /* Rolling net cost (mirrors the old "Rolling Net Hedge Cost" chart) */
+    let cp = 0, cpay = 0;
+    const cumPrem = [], cumPay = [], cumNet = [];
+    leg.periods.forEach(p => {
+      cp += (p[premiumField] || 0);
+      cpay += (p[payoffField] || 0);
+      cumPrem.push(cp * 100);
+      cumPay.push(cpay * 100);
+      cumNet.push((cp - cpay) * 100);
+    });
+    chartInstances.push(new Chart(document.getElementById(cumHedgeCostChartId), {
+      type:'line', data:{ labels: legLabels, datasets:[
+        { label: isLongOption?'Cumulative Premium Paid':'Cumulative Premium Received', data: cumPrem, borderColor:'#e2a336', tension:0.2 },
+        { label: isLongOption?'Cumulative Payoff Received':'Cumulative Payoff Owed', data: cumPay, borderColor:'#1fae7a', tension:0.2 },
+        { label:'Net Cost', data: cumNet, borderColor:'#1c2130', borderDash:[3,3], tension:0.2 },
+      ]},
+      options:{...baseOpts, plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.raw.toFixed(2)+'%'}}}, scales:{...baseOpts.scales, y:{...baseOpts.scales.y, ticks:{callback:v=>v+'%'}}}},
     }));
   }
 });
