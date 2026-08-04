@@ -23,6 +23,19 @@ accounting: capital_weight = 0 for both, so they never appear on the gearing
 chart. Their notional exposure is tracked separately (see "notional" column on
 each leg's results_df) so a dedicated short-exposure chart can be built from it.
 
+Leg-level metrics (compute_leg_metrics) measure each leg's return_contribution
+directly as a fraction of $1 TOTAL equity -- NOT return_contribution divided by
+capital_weight. Dividing by capital_weight is wrong for options legs: they spend
+~100% of their allocated capital on premium every period, so any non-exercised
+period would produce leg_return = -1.0 (-100%), and cumprod() would permanently
+zero the series the first time that happens. Using return_contribution directly
+avoids this and matches how the leg actually affects Net Portfolio wealth.
+
+The Net Portfolio results_df also carries a "spx_return_used" column (the
+benchmark return for that same period, when available) so the report's Returns
+and Annual Alpha vs SPX charts can be built directly from the net results
+without a second lookup.
+
 This lets any combination of legs be run together (or standalone) without the
 engine needing to special-case combinations.
 """
@@ -396,7 +409,8 @@ def build_market_context(rebalance_periods, frequency, available, returns_df, no
         to the weight actually matched to data). This is "return per dollar
         allocated to the long-portfolio leg", independent of how much capital
         is allocated to that leg overall.
-      - spx_return: benchmark return over the same period (used by options legs).
+      - spx_return: benchmark return over the same period (used by options legs
+        and carried through to the Net Portfolio results_df as "spx_return_used").
       - monthly_port_rets: monthly-frequency version of the portfolio return,
         used for risk-frequency resampling in metrics.
       - tickers_by_period: holdings set per period, used for turnover.
@@ -737,7 +751,9 @@ SHORT_EXPOSURE_TYPES = {"short_call", "short_put"}
 # Net Portfolio combination (capital ledger + financing/gearing)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available, risk_free_rate):
+def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available,
+                                     risk_free_rate, spx_return_map=None):
+    spx_return_map = spx_return_map or {}
     rows = []
     for rp in rebalance_periods:
         total_capital = 0.0
@@ -773,6 +789,7 @@ def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, fr
             "leg_return_contribution": total_return,
             "net_return": net_return,
             "short_exposure": total_short_exposure,
+            "spx_return_used": spx_return_map.get(rp, None),
         })
 
     net_df = pd.DataFrame(rows).sort_values("period").reset_index(drop=True)
@@ -781,21 +798,22 @@ def combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, fr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Leg-level metrics (return on capital actually deployed to that leg)
+# Leg-level metrics (return contribution as a fraction of $1 TOTAL equity)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_leg_metrics(leg_df, frequency, risk_frequency, rolling_window, ppy):
+    """
+    Leg return is measured as return_contribution directly (fraction of $1
+    TOTAL equity), NOT return_contribution / capital_weight. Dividing by
+    capital_weight is wrong for options legs: they spend ~100% of their
+    allocated capital on premium every period, so any non-exercised period
+    would produce leg_return = -1.0 (-100%), and cumprod() would permanently
+    zero the series the first time that happens. Using return_contribution
+    directly avoids this and matches how the leg actually affects Net
+    Portfolio wealth.
+    """
     df = leg_df.copy()
-    if "capital_weight" in df.columns and df["capital_weight"].abs().sum() > 0:
-        df["leg_return"] = np.where(
-            df["capital_weight"] > 0,
-            df["return_contribution"] / df["capital_weight"],
-            df["return_contribution"],
-        )
-    else:
-        # capital-neutral legs (short options): report return_contribution directly,
-        # since there's no capital base to divide by.
-        df["leg_return"] = df["return_contribution"]
+    df["leg_return"] = df["return_contribution"]
     return compute_metrics(df, "leg_return", frequency, risk_frequency, rolling_window, ppy)
 
 
@@ -868,7 +886,10 @@ def run_backtest(
         leg_meta[leg_key] = {"label": leg_cfg.get("label", leg_key), "type": leg_type}
         leg_types[leg_key] = leg_type
 
-    net_df = combine_legs_into_net_portfolio(leg_frames, leg_types, rebalance_periods, frequency, available, risk_free_rate)
+    net_df = combine_legs_into_net_portfolio(
+        leg_frames, leg_types, rebalance_periods, frequency, available, risk_free_rate,
+        spx_return_map=market["spx_return"],
+    )
 
     net_metrics = compute_metrics(
         net_df.rename(columns={"net_return": "_ret"}), "_ret", frequency, risk_frequency, rolling_window, ppy,
