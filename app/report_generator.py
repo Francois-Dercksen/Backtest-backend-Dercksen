@@ -1,124 +1,64 @@
 """
 report_generator.py
 
-Builds the HTML dashboard by injecting JSON data into the placeholder
-tokens inside the hedge report template. Field names match exactly
-what backtest_report_hedge_template.html's JS expects (see STATS
-lookups via getStat(section, metric) and RESULTS.map(r => r.<field>)).
+Builds the self-contained HTML dashboard for a backtest run.
+Consumes the modular {"net": {...}, "legs": {...}} structure produced by
+backtest_engine.run_backtest(), so any combination of legs renders correctly
+without special-casing per strategy.
 """
 
 import json
 import math
 import os
 
-import numpy as np
-import pandas as pd
-
-TEMPLATE_PATH = os.path.join("Input", "backtest_report_hedge_template.html")
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "templates", "report_template.html")
 
 
-def _clean_val(v):
-    if hasattr(v, "isoformat"):
-        return v.isoformat()[:10]
-    if hasattr(v, "strftime") and not hasattr(v, "isoformat"):
-        return str(v)
-    if type(v).__module__ == "numpy":
-        item = v.item()
-        return None if isinstance(item, float) and math.isnan(item) else item
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, float) and math.isnan(v):
-        return None
-    return v
+def sanitise_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: sanitise_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitise_for_json(v) for v in obj]
+    if hasattr(obj, "isoformat"):
+        return str(obj)
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if hasattr(obj, "item"):  # numpy scalar
+        item = obj.item()
+        if isinstance(item, float) and (math.isnan(item) or math.isinf(item)):
+            return None
+        return item
+    return obj
 
 
-def sanitise_for_json(records):
-    return [{k: _clean_val(v) for k, v in row.items()} for row in records]
+def generate_report_html(net_results_df, net_metrics, legs, frequency="annual",
+                          risk_frequency="monthly", benchmark_ticker="SPX"):
+    net_df = net_results_df.copy()
+    net_df["period"] = net_df["period"].astype(str)
+    net_records = sanitise_for_json(net_df.to_dict(orient="records"))
+    net_metrics_clean = sanitise_for_json(net_metrics)
 
+    legs_payload = {}
+    for leg_key, leg_data in legs.items():
+        leg_df = leg_data["results_df"].copy()
+        leg_df["period"] = leg_df["period"].astype(str)
+        legs_payload[leg_key] = {
+            "label": leg_data["label"],
+            "type": leg_data["type"],
+            "metrics": sanitise_for_json(leg_data["metrics"]),
+            "periods": sanitise_for_json(leg_df.to_dict(orient="records")),
+        }
 
-def build_period_records(results_df):
-    """
-    Field names must match the template's RESULTS.map(r => r.<field>)
-    usage exactly: period, portfolio_return_adjusted, spx_return,
-    exercised, premium_paid_pct_initial, payoff_pct_initial,
-    net_hedge_pnl_pct_port, hedged_return, cumulative_return,
-    hedged_cumulative_return, n_holdings.
-    """
-    cols = [
-        "period", "date", "portfolio_return_adjusted", "spx_return",
-        "exercised", "premium_paid_pct_initial", "payoff_pct_initial",
-        "net_hedge_pnl_pct_port", "hedged_return", "cumulative_return",
-        "hedged_cumulative_return", "n_holdings",
-    ]
-    records = results_df[[c for c in cols if c in results_df.columns]].to_dict(orient="records")
-    return records
-
-
-def build_stats_records(metrics, frequency, risk_frequency, benchmark_ticker):
-    """
-    metrics is expected to be {"unhedged": {...}, "hedged": {...}, "put_stats": {...}}.
-    Rows must match template's getStat(section, metric) lookups:
-    section in {"Info", "Unhedged", "Hedged", "Put/Hedge Stats"}.
-    """
-    rows = [
-        {"section": "Info", "metric": "frequency", "value": frequency, "description": ""},
-        {"section": "Info", "metric": "risk_frequency", "value": risk_frequency, "description": ""},
-        {"section": "Info", "metric": "OTM", "value": 0.0, "description": "Long-only, no hedge overlay"},
-        {"section": "Info", "metric": "Beta", "value": None, "description": ""},
-    ]
-
-    metric_keys = [
-        "annualised_return", "total_cumulative", "sharpe", "sortino",
-        "max_drawdown", "calmar", "var_95", "hit_rate", "std_period_return",
-        "best_rolling_cagr", "worst_rolling_cagr",
-        "best_period", "best_period_return", "worst_period", "worst_period_return",
-    ]
-
-    for section_label, key in [("Unhedged", "unhedged"), ("Hedged", "hedged")]:
-        m = metrics.get(key, {}) or {}
-        for k in metric_keys:
-            rows.append({"section": section_label, "metric": k, "value": m.get(k), "description": ""})
-        bm = m.get("benchmark")
-        if bm:
-            for k, v in bm.items():
-                rows.append({"section": f"{section_label} vs {benchmark_ticker}", "metric": k, "value": v, "description": ""})
-
-    put_stats = metrics.get("put_stats", {}) or {}
-    for k, v in put_stats.items():
-        rows.append({"section": "Put/Hedge Stats", "metric": k, "value": v, "description": ""})
-
-    return rows
-
-
-def generate_report_html(
-    results_df: pd.DataFrame,
-    metrics: dict,
-    frequency: str,
-    risk_frequency: str,
-    benchmark_ticker: str = "SPX",
-    template_path: str = TEMPLATE_PATH,
-):
-    results_df = results_df.copy()
-    if "period" in results_df.columns:
-        results_df["period"] = results_df["period"].astype(str)
-        results_df = results_df.sort_values("period").reset_index(drop=True)
-
-    stats_records = sanitise_for_json(build_stats_records(metrics, frequency, risk_frequency, benchmark_ticker))
-    period_records = sanitise_for_json(build_period_records(results_df))
-    missing_records = []
-
-    stats_js = json.dumps(stats_records, ensure_ascii=False)
-    periods_js = json.dumps(period_records, ensure_ascii=False)
-    missing_js = json.dumps(missing_records, ensure_ascii=False)
-
-    with open(template_path, "r", encoding="utf-8") as f:
+    with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
-    html = html.replace("__STATS_JSON__", stats_js)
-    html = html.replace("__PERIODS_JSON__", periods_js)
-    html = html.replace("__MISSING_JSON__", missing_js)
-    html = html.replace("__BENCH__", benchmark_ticker)
+    html = html.replace("__NET_PERIODS_JSON__", json.dumps(net_records, ensure_ascii=False))
+    html = html.replace("__NET_METRICS_JSON__", json.dumps(net_metrics_clean, ensure_ascii=False))
+    html = html.replace("__LEGS_JSON__", json.dumps(legs_payload, ensure_ascii=False))
     html = html.replace("__FREQUENCY__", frequency)
-    html = html.replace("__RISK_FREQUENCY__", risk_frequency.capitalize())
+    html = html.replace("__RISK_FREQUENCY__", risk_frequency)
+    html = html.replace("__BENCHMARK_TICKER__", benchmark_ticker)
 
     return html
